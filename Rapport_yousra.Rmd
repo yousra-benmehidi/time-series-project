@@ -1,0 +1,251 @@
+---
+title: "Projet Time Series"
+author: "BENMEHIDI Yousra Amel - Liliya SHEVALYE"
+date: "2026-11-13"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 7, fig.height = 3.5)
+```
+
+# 1. Description du dataset
+
+Le jeu de données recense la consommation d’énergie mensuelle facturée à un opérateur mobile pour l’alimentation de ses sites d’accès radio. Chaque site est identifié par la variable Name. La période de facturation est délimitée par les dates BEGIN et END (format jj/mm/aaaa), et la quantité d’énergie facturée sur cette période est donnée en kWh par la variable KWH_PERIOD. Chaque site dispose d’un historique de 35 mois.
+
+```{r include=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+library(knitr)
+
+# French number formatting for tables: 2 500,3
+fr <- function(x, d = 0) formatC(x, format = "f", digits = d, big.mark = " ", decimal.mark = ",")
+```
+
+```{r}
+df <- read.csv("TimeSeries.csv", header = TRUE, sep = ",")
+
+df <- df %>%
+  mutate(
+    KWH_PERIOD  = as.numeric(gsub("\\s", "", KWH_PERIOD)),  # "2 500" -> 2500
+    BEGIN       = dmy(BEGIN),                                # dd/mm/yyyy
+    END         = dmy(END),
+    DAYS        = as.numeric(END - BEGIN) + 1,               # length of billing period
+    KWH_PER_DAY = KWH_PERIOD / DAYS,                         # normalizes Feb vs 31-day months
+    MONTH       = floor_date(BEGIN, "month"),                # first day of the month
+    GROUP       = substr(NAME, nchar(NAME) - 1, nchar(NAME)) # BB / BR / KO suffix
+  ) %>%
+  arrange(NAME, MONTH)
+```
+
+## 1.1 Nombre de sites et couverture temporelle
+
+```{r}
+months_per_site <- df %>% group_by(NAME) %>% summarise(n_months = n_distinct(MONTH))
+
+# first/last month per site
+coverage <- df %>% group_by(NAME) %>%
+  summarise(first = min(MONTH), last = max(MONTH), n_months = n_distinct(MONTH))
+
+# billing periods that are NOT a full calendar month
+irregular <- df %>%
+  filter(day(BEGIN) != 1 | END != ceiling_date(BEGIN, "month") - days(1))
+
+overview <- data.frame(
+  Indicateur = c("Nombre de sites", "Nombre d'observations", "Période couverte",
+                 "Mois par site", "Valeurs manquantes", "Doublons (site, mois)"),
+  Valeur = c(n_distinct(df$NAME),
+             fr(nrow(df)),
+             paste(format(min(coverage$first), "%m/%Y"), "à", format(max(coverage$last), "%m/%Y")),
+             paste(unique(months_per_site$n_months), collapse = ", "),
+             sum(is.na(df$KWH_PERIOD)),
+             sum(duplicated(df[c("NAME", "MONTH")])))
+)
+kable(overview, col.names = c("", ""), align = c("l", "r"), booktabs = TRUE,
+      caption = "Vue d'ensemble du jeu de données")
+```
+
+```{r}
+irregular %>%
+  transmute(Site = NAME,
+            `Début` = format(BEGIN, "%d/%m/%Y"),
+            Fin = format(END, "%d/%m/%Y"),
+            Jours = DAYS,
+            kWh = fr(KWH_PERIOD)) %>%
+  kable(align = c("l", "c", "c", "r", "r"), booktabs = TRUE,
+        caption = "Périodes de facturation ne couvrant pas un mois calendaire complet")
+```
+
+```{r}
+#Mise en forme en séries temporelles
+
+#wide format: one column per site, one row per month
+wide <- df %>%
+  select(MONTH, NAME, KWH_PERIOD) %>%
+  pivot_wider(names_from = NAME, values_from = KWH_PERIOD) %>%
+  arrange(MONTH)
+
+# a list of ts objects, one per site (monthly, frequency = 12)
+series <- lapply(split(df, df$NAME), function(d)
+  ts(d$KWH_PERIOD,
+     start = c(year(min(d$MONTH)), month(min(d$MONTH))),
+     frequency = 12))
+```
+
+# 2. Statistiques descriptives
+
+## 2.1 Statistiques globales et par site
+
+```{r}
+site_median <- df %>% group_by(NAME) %>% summarise(med = median(KWH_PERIOD))
+giants <- site_median$NAME[site_median$med > 100000]   # "0698BR" "0998BR"
+std <- df %>% filter(!NAME %in% giants)
+
+describe <- function(x) c(Min = min(x), Q1 = quantile(x, .25), `Médiane` = median(x),
+                          Moyenne = mean(x), Q3 = quantile(x, .75), Max = max(x), `Écart-type` = sd(x))
+global <- rbind(`Tous les sites` = describe(df$KWH_PERIOD),
+                `Hors 2 grands sites` = describe(std$KWH_PERIOD))
+colnames(global) <- c("Min", "Q1", "Médiane", "Moyenne", "Q3", "Max", "Écart-type")
+kable(apply(global, 2, fr), align = "r", booktabs = TRUE,
+      caption = "Consommation mensuelle facturée (kWh)")
+```
+Le tableau 3 présente la consommation mensuelle facturée (kWh). Sur la ligne « Tous les sites », la moyenne est nettement supérieure à la médiane (de plus de 8 000 kWh). Cela traduit une distribution asymétrique à droite : quelques valeurs très élevées tirent la moyenne vers le haut. Une fois les deux grands sites retirés, la moyenne et la médiane deviennent proches, et la distribution est approximativement symétrique. L’asymétrie provient donc presque entièrement de ces deux sites, dont l’ordre de grandeur est bien supérieur à celui du reste du parc ; c’est pourquoi nous les analysons séparément. Cela montre aussi que, sur l’ensemble des sites, la moyenne ne reflète pas bien un site typique : la médiane est plus représentative.
+
+Le minimum n’est pas nul : aucun mois n’a donc été facturé à 0 kWh. En revanche, le maximum est très supérieur au troisième quartile : environ 225 fois plus élevé sur l’ensemble des sites (593 585 contre 2 644 kWh), ce qui reflète l’ordre de grandeur des deux grands sites. Même sans eux, le maximum reste environ trois fois supérieur au troisième quartile. Certains mois présentent donc des consommations bien au-dessus du niveau habituel. Il peut s’agir de sites réellement plus consommateurs ou d’erreurs de facturation ; l’analyse par site permettra de faire la distinction.
+
+```{r}
+site_stats <- df %>% group_by(NAME, GROUP) %>%
+  summarise(mean = mean(KWH_PERIOD), median = median(KWH_PERIOD), sd = sd(KWH_PERIOD),
+            min = min(KWH_PERIOD), max = max(KWH_PERIOD), cv = sd / mean, .groups = "drop")
+
+cv_classes <- as.data.frame(table(cut(site_stats$cv, c(0, .05, .1, .2, 1),
+  labels = c("< 5 %  (très stable)", "5–10 %  (stable)", "10–20 %  (variable)", "> 20 %  (très variable)"))))
+cv_classes$Part <- paste0(fr(100 * cv_classes$Freq / sum(cv_classes$Freq)), " %")
+kable(cv_classes, col.names = c("Coefficient de variation", "Nombre de sites", "Part"),
+      align = c("l", "r", "r"), booktabs = TRUE,
+      caption = "Stabilité des sites (coefficient de variation = écart-type / moyenne)")
+```
+
+```{r}
+site_stats %>% arrange(desc(cv)) %>% head(10) %>%
+  transmute(Site = NAME, Moyenne = fr(mean), `Médiane` = fr(median),
+            Min = fr(min), Max = fr(max), CV = paste0(fr(100 * cv), " %")) %>%
+  kable(align = c("l", rep("r", 5)), booktabs = TRUE,
+        caption = "Les 10 sites les plus variables (kWh/mois)")
+```
+
+## 2.2 Distribution de la consommation
+
+```{r}
+ggplot(site_median, aes(med)) + geom_histogram(bins = 30) + scale_x_log10(labels = scales::label_number(big.mark = " ")) +
+  labs(title = "Consommation mensuelle médiane par site (échelle log)", x = "kWh", y = "Nombre de sites") + theme_minimal()
+
+ggplot(std, aes(KWH_PERIOD)) + geom_histogram(bins = 50) +
+  scale_x_continuous(labels = scales::label_number(big.mark = " ")) +
+  labs(title = "Consommation mensuelle, hors 2 grands sites", x = "kWh", y = "Nombre d'observations") + theme_minimal()
+```
+
+## 2.3 Comparaison par groupe de sites
+
+```{r}
+ggplot(std, aes(GROUP, KWH_PERIOD)) +
+  geom_boxplot(outlier.shape = NA) +
+  coord_cartesian(ylim = quantile(std$KWH_PERIOD, c(0, 0.98))) +
+  scale_y_continuous(labels = scales::label_number(big.mark = " ")) +
+  labs(title = "Consommation mensuelle par suffixe de site (hors 2 grands sites)", x = NULL, y = "kWh") +
+  theme_minimal()
+```
+
+# 3. Analyse temporelle
+
+## 3.1 Tendance : croissance annuelle
+
+```{r}
+total <- df %>% group_by(MONTH) %>% summarise(total = sum(KWH_PERIOD))
+ggplot(total, aes(MONTH, total / 1000)) + geom_line() + geom_point(size = 1) +
+  labs(title = "Consommation totale facturée, tous sites", x = NULL, y = "MWh") + theme_minimal()
+```
+
+```{r}
+df %>% filter(month(MONTH) <= 11) %>%            # 2021 stops in Nov, so compare Jan–Nov
+  group_by(Y = year(MONTH)) %>% summarise(total = sum(KWH_PERIOD)) %>%
+  mutate(growth = total / lag(total) - 1) %>%
+  transmute(`Année` = Y,
+            `Consommation janv.–nov. (MWh)` = fr(total / 1000),
+            `Évolution` = ifelse(is.na(growth), "–", paste0("+", fr(100 * growth, 1), " %"))) %>%
+  kable(align = c("l", "r", "r"), booktabs = TRUE,
+        caption = "Croissance annuelle (janvier–novembre, pour comparer des périodes identiques)")
+```
+
+## 3.2 Saisonnalité
+
+```{r}
+seas <- std %>%
+  group_by(NAME) %>% mutate(NORM = KWH_PER_DAY / median(KWH_PER_DAY)) %>% ungroup() %>%
+  mutate(MOY = factor(month(MONTH), levels = 1:12,
+                      labels = c("janv.", "févr.", "mars", "avr.", "mai", "juin",
+                                 "juil.", "août", "sept.", "oct.", "nov.", "déc.")))
+
+ggplot(seas, aes(MOY, NORM)) +
+  geom_boxplot(outlier.shape = NA) +
+  coord_cartesian(ylim = c(0.8, 1.2)) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  labs(title = "Saisonnalité : kWh/jour rapporté à la médiane du site",
+       x = NULL, y = "Ratio à la médiane du site") +
+  theme_minimal()
+```
+
+## 3.3 Décomposition STL de la consommation totale
+
+```{r fig.height=5}
+tot <- ts(total$total, start = c(2019, 1), frequency = 12)
+plot(stl(tot, s.window = "periodic"), main = "Décomposition STL de la consommation totale")
+```
+
+## 3.4 Autocorrélation
+
+```{r}
+acf_lag1  <- sapply(series, function(s) acf(s, plot = FALSE)$acf[2])
+acf_lag12 <- sapply(series, function(s) acf(s, lag.max = 12, plot = FALSE)$acf[13])
+
+acf_tab <- rbind(`Lag 1 (mois précédent)` = quantile(acf_lag1, c(0, .25, .5, .75, 1)),
+                 `Lag 12 (même mois, année précédente)` = quantile(acf_lag12, c(0, .25, .5, .75, 1)))
+colnames(acf_tab) <- c("Min", "Q1", "Médiane", "Q3", "Max")
+kable(apply(acf_tab, 2, fr, d = 2), align = "r", booktabs = TRUE,
+      caption = "Distribution de l'autocorrélation sur les 92 sites")
+```
+
+```{r}
+acf(series[["0007BR"]], main = "Autocorrélation - site 0007BR", xlab = "Décalage (années)")
+```
+
+# 4. Comportement individuel des sites
+
+## 4.1 Vue d'ensemble : consommation relative de chaque site
+
+```{r fig.height=9}
+heat <- df %>% group_by(NAME) %>%
+  mutate(RATIO = KWH_PERIOD / median(KWH_PERIOD)) %>% ungroup()
+
+ggplot(heat, aes(MONTH, NAME, fill = pmin(RATIO, 2))) +
+  geom_tile() +
+  scale_fill_distiller(palette = "RdBu", limits = c(0, 2), name = "Ratio à la\nmédiane du site") +
+  labs(title = "Consommation de chaque site / sa médiane", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 4.5))
+```
+
+## 4.2 Exemples de sites atypiques
+
+```{r fig.height=6}
+examples <- c("0007BR", "0089KO", "0254BB", "0496BB", "1240BR", "0628BR")
+ggplot(filter(df, NAME %in% examples), aes(MONTH, KWH_PERIOD)) +
+  geom_line() + geom_point(size = 0.8) +
+  facet_wrap(~ NAME, ncol = 2, scales = "free_y") +
+  scale_y_continuous(labels = scales::label_number(big.mark = " ")) +
+  labs(title = "Consommation mensuelle : un site stable et cinq sites atypiques", x = NULL, y = "kWh") +
+  theme_minimal()
+```
