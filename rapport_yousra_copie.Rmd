@@ -1,0 +1,307 @@
+---
+title: "Time series rapport"
+author: "Yousra Amel BENMEHIDI - Liliya SHEVALYE"
+date: "2026-11-16"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 7, fig.height = 3.5)
+```
+
+
+# 1. Description du dataset
+
+Le jeu de données recense la consommation d’énergie mensuelle facturée à un opérateur mobile pour l’alimentation de ses sites d’accès radio. Chaque site est identifié par la variable NAME. La période de facturation est délimitée par les dates BEGIN et END (format jj/mm/aaaa), et la quantité d’énergie facturée sur cette période est donnée en kWh par la variable KWH_PERIOD. Il couvre de 92 sites, chacun disposant d’un historique de 35 mois (janvier 2019 à novembre 2021).
+```{r include=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+library(knitr)
+
+# French number formatting for tables: 2 500,3
+fr <- function(x, d = 0) formatC(x, format = "f", digits = d, big.mark = " ", decimal.mark = ",")
+```
+
+```{r}
+df <- read.csv("TimeSeries.csv", header = TRUE, sep = ",")
+
+df <- df %>%
+  mutate(
+    KWH_PERIOD  = as.numeric(gsub("\\s", "", KWH_PERIOD)),  # "2 500" -> 2500
+    BEGIN       = dmy(BEGIN),                                # dd/mm/yyyy
+    END         = dmy(END),
+    DAYS        = as.numeric(END - BEGIN) + 1,               # length of billing period
+    KWH_PER_DAY = KWH_PERIOD / DAYS,                         # normalizes Feb vs 31-day months
+    MONTH       = floor_date(BEGIN, "month"),                # first day of the month
+    GROUP       = substr(NAME, nchar(NAME) - 1, nchar(NAME)) # BB / BR / KO suffix
+  ) %>%
+  arrange(NAME, MONTH)
+```
+
+```{r}
+months_per_site <- df %>% group_by(NAME) %>% summarise(n_months = n_distinct(MONTH))
+
+# first/last month per site
+coverage <- df %>% group_by(NAME) %>%
+  summarise(first = min(MONTH), last = max(MONTH), n_months = n_distinct(MONTH))
+
+# billing periods that are NOT a full calendar month
+irregular <- df %>%
+  filter(day(BEGIN) != 1 | END != ceiling_date(BEGIN, "month") - days(1))
+
+overview <- data.frame(
+  Indicateur = c("Nombre de sites", "Nombre d'observations", "Période couverte",
+                 "Mois par site", "Valeurs manquantes", "Doublons (site, mois)"),
+  Valeur = c(n_distinct(df$NAME),
+             fr(nrow(df)),
+             paste(format(min(coverage$first), "%m/%Y"), "à", format(max(coverage$last), "%m/%Y")),
+             paste(unique(months_per_site$n_months), collapse = ", "),
+             sum(is.na(df$KWH_PERIOD)),
+             sum(duplicated(df[c("NAME", "MONTH")])))
+)
+kable(overview, col.names = c("", ""), align = c("l", "r"), booktabs = TRUE,
+      caption = "Vue d'ensemble du jeu de données")
+```
+
+# 2. Compréhension des données et statistiques descriptives:
+## 2.1 Périodes de facturation irrégulières
+
+```{r}
+irregular %>%
+  transmute(Site = NAME,
+            `Début` = format(BEGIN, "%d/%m/%Y"),
+            Fin = format(END, "%d/%m/%Y"),
+            Jours = DAYS,
+            kWh = fr(KWH_PERIOD)) %>%
+  kable(align = c("l", "c", "c", "r", "r"), booktabs = TRUE,
+        caption = "Périodes de facturation ne couvrant pas un mois calendaire complet")
+```
+
+Selon le tableau, seules deux factures ne couvrent pas un mois calendaire complet.
+
+### Cas 1 : 0628BR
+```{r}
+df %>%
+  filter(NAME == "0628BR", MONTH >= as.Date("2021-06-01")) %>%
+  transmute(`Début` = format(BEGIN, "%d/%m/%Y"),
+            Fin = format(END, "%d/%m/%Y"),
+            Jours = DAYS,
+            kWh = fr(KWH_PERIOD),
+            `kWh/jour` = fr(KWH_PER_DAY, 1)) %>%
+  kable(align = c("c", "c", "r", "r", "r"), booktabs = TRUE,
+        caption = "Site 0628BR, juin–novembre 2021")
+```
+
+Pour le site 0628BR, la facture de septembre 2021 est du même ordre que celles des autres mois (687 kWh), alors qu'elle ne couvre que 16 jours au lieu d'un mois complet.
+
+
+Cela laisse penser à une erreur de facturation, qui peut s'interpréter de deux façons :
+
+- soit la date de début est erronée et a été enregistrée au 15/09 au lieu du 01/09. Comme le montant de 687 kWh correspond à celui des autres mois, cette hypothèse paraît plausible
+- soit la période du 01/09 au 14/09 n’a pas été facturée, et le site a consommé en deux semaines l’équivalent d’un mois d’énergie, soit une consommation journalière presque doublée. Ces deux événements simultanés sont peu probables : nous retenons donc la première interprétation.
+
+### Cas 2 : 0089KO
+
+La facture de février 2020 s’arrête au 28/02, alors que 2020 est une année bissextile : le 29 février n’est donc couvert par aucune facture, puisque celle de mars commence le 01/03. L’écart ne représente qu’une journée (environ 78 kWh, soit 3,5 % du mois) et la consommation journalière reste cohérente avec les mois voisins. Nous considérons donc cet écart comme négligeable et conservons cette ligne telle quelle.
+
+## 2.2 Niveau de consommation par site
+```{r}
+site_median <- df %>% group_by(NAME) %>% summarise(med = median(KWH_PERIOD)) %>%
+  arrange(desc(med))
+
+site_median %>% head(5) %>%
+  transmute(Rang = row_number(), Site = NAME, `Médiane (kWh/mois)` = fr(med)) %>%
+  kable(align = c("c", "l", "r"), booktabs = TRUE,
+        caption = "Les 5 sites à la plus forte consommation mensuelle médiane")
+```
+
+```{r}
+ggplot(site_median, aes(med)) + geom_histogram(bins = 30) +
+  scale_x_log10(labels = scales::label_number(big.mark = " ")) +
+  labs(title = "Consommation mensuelle médiane par site (échelle log)",
+       x = "kWh", y = "Nombre de sites") + theme_minimal()
+```
+
+```{r}
+giants <- site_median$NAME[site_median$med > 100000]   # any threshold between ~6 000 and ~350 000 gives the same 2 sites
+std    <- df %>% filter(!NAME %in% giants)
+big    <- df %>% filter(NAME %in% giants)
+share  <- sum(big$KWH_PERIOD) / sum(df$KWH_PERIOD)
+```
+Le tableau 4 classe les sites selon leur consommation mensuelle médiane. Deux sites se détachent nettement : 0698BR (432 776 kWh/mois) et 0998BR (347 208 kWh/mois). Le troisième site, 1001BB, ne consomme que 6 236 kWh/mois, soit environ 55 fois moins. L’histogramme en échelle logarithmique le confirme : les 90 autres sites forment un seul groupe, entre environ 550 et 6 200 kWh/mois, tandis que les deux grands sites apparaissent isolés, à droite.
+
+Ces deux sites ne sont donc pas simplement « plus gros » : ils relèvent d’un autre ordre de grandeur. Bien qu’ils ne représentent que 2 % des sites, ils concentrent `r fr(100*share)` % de l’énergie facturée. Les inclure dans les statistiques globales masquerait le comportement d’un site typique ; nous les analysons donc séparément dans la suite du rapport. Le seuil retenu pour les isoler (100 000 kWh/mois de médiane) n’a pas d’importance particulière : toute valeur comprise entre environ 6 000 et 350 000 kWh isole les deux mêmes sites.
+
+## 2.3 Statistiques globales
+```{r}
+describe <- function(x) c(min(x), quantile(x, .25), median(x), mean(x),
+                          quantile(x, .75), max(x), sd(x))
+global <- rbind(`Tous les sites`   = describe(df$KWH_PERIOD),
+                `90 sites`         = describe(std$KWH_PERIOD),
+                `2 grands sites`   = describe(big$KWH_PERIOD))
+colnames(global) <- c("Min", "Q1", "Médiane", "Moyenne", "Q3", "Max", "Écart-type")
+kable(apply(global, 2, fr), align = "r", booktabs = TRUE,
+      caption = "Consommation mensuelle facturée (kWh)")
+```
+Le tableau présente la consommation mensuelle facturée (kWh). Sur la ligne « Tous les sites », la moyenne est nettement supérieure à la médiane (de plus de 8 000 kWh). Cela traduit une distribution asymétrique à droite : quelques valeurs très élevées tirent la moyenne vers le haut. Sur les 90 sites, la moyenne et la médiane deviennent proches (2 080 contre 2 195 kWh), et l’écart-type passe de 58 290 à 886 kWh. L’asymétrie provient donc presque entièrement des deux grands sites, ce qui confirme la nécessité de les analyser séparément. Cela montre aussi que, sur l’ensemble des sites, la moyenne ne reflète pas bien un site typique : la médiane est plus représentative.
+
+Le minimum n’est pas nul : aucun mois n’a donc été facturé à 0 kWh. En revanche, le maximum est très supérieur au troisième quartile : environ 225 fois plus élevé sur l’ensemble des sites (593 585 contre 2 644 kWh), ce qui reflète l’ordre de grandeur des deux grands sites. Même sur les 90 sites, le maximum reste environ deux fois et demie supérieur au troisième quartile (6 524 contre 2 619 kWh). Certains mois présentent donc des consommations bien au-dessus du niveau habituel. Il peut s’agir de sites réellement plus consommateurs ou d’erreurs de facturation ; l’analyse par site permettra de faire la distinction.
+
+Les deux grands sites consomment entre 304 260 et 593 585 kWh par mois. Leur moyenne (395 087 kWh) dépasse leur médiane d’environ 30 000 kWh, sous l’effet des valeurs les plus élevées. Ces valeurs proviennent de 0698BR, dont la consommation augmente fortement en 2021 : d’environ 405 000 kWh en février, elle atteint près de 590 000 kWh en juillet–août. Il ne s’agit donc pas d’un pic isolé mais d’une hausse durable, que l’on retrouvera dans l’analyse temporelle.
+
+## 2.4 Statistiques par site
+```{r}
+site_stats <- df %>% group_by(NAME, GROUP) %>%
+  summarise(mean = mean(KWH_PERIOD), median = median(KWH_PERIOD), sd = sd(KWH_PERIOD),
+            min = min(KWH_PERIOD), max = max(KWH_PERIOD), cv = sd / mean, .groups = "drop")
+
+cv_classes <- as.data.frame(table(cut(site_stats$cv, c(0, .05, .1, .2, Inf),
+  labels = c("< 5 %  (très stable)", "5–10 %  (stable)", "10–20 %  (variable)", "> 20 %  (très variable)"))))
+cv_classes$Part <- paste0(fr(100 * cv_classes$Freq / sum(cv_classes$Freq)), " %")
+kable(cv_classes, col.names = c("Coefficient de variation", "Nombre de sites", "Part"),
+      align = c("l", "r", "r"), booktabs = TRUE,
+      caption = "Stabilité des sites (coefficient de variation = écart-type / moyenne)")
+```
+Pour mesurer la stabilité de chaque site, nous utilisons le coefficient de variation (CV), c’est-à-dire l’écart-type rapporté à la moyenne. Comme il ne dépend pas du niveau de consommation, il permet de comparer des sites de tailles très différentes.
+
+La majorité des sites sont stables : 57 sites sur 92, soit près de deux tiers, ont un CV inférieur à 10 %, et 17 d’entre eux restent sous 5 %. Leur consommation varie donc peu d’un mois à l’autre. C’est notamment le cas du grand site 0998BR (CV de 5 %), alors que 0698BR (15 %) est plus variable, ce qui s’explique par sa hausse en 2021.
+
+Les 25 sites entre 10 et 20 % présentent une variabilité modérée, qui peut venir d’une tendance ou d’un effet saisonnier plutôt que d’anomalies. Enfin, 10 sites (11 %) dépassent 20 % : leur consommation connaît des variations importantes qui méritent d’être examinées individuellement. Ils sont détaillés dans le tableau suivant.
+
+```{r}
+site_stats %>% arrange(desc(cv)) %>% head(10) %>%
+  transmute(Site = NAME, Moyenne = fr(mean), `Médiane` = fr(median),
+            Min = fr(min), Max = fr(max), CV = paste0(fr(100 * cv), " %")) %>%
+  kable(align = c("l", rep("r", 5)), booktabs = TRUE,
+        caption = "Les 10 sites les plus variables (kWh/mois)")
+```
+Le tableau présente les 10 sites dont le coefficient de variation dépasse 30 %. L’examen de leurs séries mensuelles montre que cette variabilité a des origines différentes.
+
+Dans la plupart des cas, elle ne vient pas de fluctuations d’un mois à l’autre, mais d’un changement durable de niveau. Quatre sites KO (1088KO, 1978KO, 1093KO, 1986KO) voient leur consommation doubler, voire tripler, entre mai et août 2020, et ce de façon simultanée ; 1911BB et 0356KO connaissent une hausse comparable en septembre–octobre 2019. À l’inverse, 1067KO voit sa consommation diminuer de moitié en juillet 2019. Ces sites sont stables avant et après la rupture : leur CV élevé reflète donc le passage d’un niveau à un autre, qui pourrait correspondre à un ajout ou un retrait d’équipements.
+```{r fig.height=7}
+shift_sites <- c("1088KO", "1978KO", "1093KO", "1986KO", "1911BB", "0356KO", "1067KO")
+
+# transition window: last "before" month -> first "after" month
+breaks <- data.frame(
+  NAME  = shift_sites,
+  start = as.Date(c(rep("2020-04-01", 4), "2019-08-01", "2019-08-01", "2019-06-01")),
+  end   = as.Date(c(rep("2020-08-01", 4), "2019-11-01", "2019-09-01", "2019-07-01"))
+) %>% mutate(NAME = factor(NAME, levels = shift_sites))
+
+df %>% filter(NAME %in% shift_sites) %>%
+  mutate(NAME = factor(NAME, levels = shift_sites)) %>%
+  ggplot(aes(MONTH, KWH_PERIOD)) +
+  geom_rect(data = breaks, aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+            inherit.aes = FALSE, fill = "orange", alpha = 0.25) +
+  geom_line() + geom_point(size = 0.8) +
+  facet_wrap(~ NAME, ncol = 2, scales = "free_y") +
+  expand_limits(y = 0) +
+  scale_y_continuous(labels = scales::label_number(big.mark = " ")) +
+  labs(title = "Sites présentant un changement durable de niveau",
+       subtitle = "Zone orange : période de transition",
+       x = NULL, y = "kWh") +
+  theme_minimal()
+```
+Trois sites présentent des profils différents. 1240BR chute brutalement à partir de mai 2021, passant d’environ 3 000 à 150 kWh par mois, ce qui pourrait indiquer un arrêt partiel du site ou un problème de comptage. 0254BB est très irrégulier en 2019 (entre 1 600 et 4 500 kWh) puis se stabilise autour de 1 400 kWh à partir de 2020. Enfin, 0089KO présente deux valeurs isolées : 201 kWh en juin 2019 et 5 133 kWh en août 2019, encadrées par des mois normaux. Ce dernier cas est le plus proche d’une erreur de facturation ponctuelle, par exemple une sous-facturation suivie d’une régularisation.
+```{r fig.height=6}
+odd_sites <- c("1240BR", "0254BB", "0089KO")
+
+periods <- data.frame(
+  NAME  = c("1240BR", "0254BB"),
+  start = as.Date(c("2021-05-01", "2019-01-01")),
+  end   = as.Date(c("2021-11-01", "2019-12-01"))
+) %>% mutate(NAME = factor(NAME, levels = odd_sites))
+
+outliers <- df %>%
+  filter(NAME == "0089KO", MONTH %in% as.Date(c("2019-06-01", "2019-08-01"))) %>%
+  mutate(NAME = factor(NAME, levels = odd_sites))
+
+df %>% filter(NAME %in% odd_sites) %>%
+  mutate(NAME = factor(NAME, levels = odd_sites)) %>%
+  ggplot(aes(MONTH, KWH_PERIOD)) +
+  geom_rect(data = periods, aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+            inherit.aes = FALSE, fill = "orange", alpha = 0.25) +
+  geom_line() + geom_point(size = 0.8) +
+  geom_point(data = outliers, colour = "red", size = 2.5) +
+  geom_text(data = outliers, aes(label = fr(KWH_PERIOD)),
+            colour = "red", vjust = -0.9, size = 3) +
+  facet_wrap(~ NAME, ncol = 1, scales = "free_y") +
+  expand_limits(y = 0) +
+  scale_y_continuous(labels = scales::label_number(big.mark = " "),
+                     expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Sites aux profils atypiques",
+       subtitle = "Zone orange : période atypique ; points rouges : valeurs isolées",
+       x = NULL, y = "kWh") +
+  theme_minimal()
+```
+Le coefficient de variation permet donc de repérer les sites atypiques, mais pas de distinguer une rupture de niveau d’une anomalie ponctuelle. Ces sites seront examinés graphiquement dans la prochaine section.
+
+## 2.5 Distribution de la consommation.
+```{r}
+ggplot(std, aes(KWH_PERIOD)) + geom_histogram(binwidth = 250) +
+  scale_x_continuous(labels = scales::label_number(big.mark = " ")) +
+  labs(title = "Consommation mensuelle des 90 sites", x = "kWh", y = "Nombre d'observations") +
+  theme_minimal()
+```
+L’histogramme des 90 sites montre une distribution qui n’est pas symétrique. On distingue un pic principal autour de 2 500–2 750 kWh, correspondant au site typique, et un second pic, plus faible, autour de 750–1 000 kWh, qui correspond à un groupe de sites plus petits. C’est ce second groupe qui place la moyenne (2 080 kWh) légèrement sous la médiane (2 195 kWh). Au-delà de 3 000 kWh, les observations deviennent rares, et aucune n’apparaît entre 4 500 et 5 500 kWh. Le petit groupe isolé autour de 6 000 kWh correspond à un seul site, 1001BB, nettement plus consommateur que les autres. Cette distribution suggère que les 90 sites ne forment pas un ensemble homogène, ce qui motive la segmentation présentée plus loin.
+
+## 2.6 Segmentation des sites
+
+### Par niveau de consommation
+
+```{r}
+set.seed(123)
+level <- std %>% group_by(NAME) %>% summarise(med = median(KWH_PERIOD))
+km <- kmeans(log(level$med), centers = 2, nstart = 25)
+level$LEVEL <- ifelse(km$cluster == which.min(km$centers), "Petits sites", "Sites standards")
+
+level %>% group_by(LEVEL) %>%
+  summarise(n = n(), min = min(med), med_seg = median(med), max = max(med)) %>%
+  transmute(Segment = LEVEL, `Nombre de sites` = n,
+            `Médiane la plus basse` = fr(min), `Médiane du segment` = fr(med_seg),
+            `Médiane la plus haute` = fr(max)) %>%
+  kable(align = c("l", rep("r", 4)), booktabs = TRUE,
+        caption = "Segmentation des 90 sites par niveau de consommation (k-means sur le log de la médiane, kWh/mois)")
+```
+
+### Par profil de consommation
+
+```{r}
+norm <- std %>% group_by(NAME) %>%
+  mutate(NORM = KWH_PER_DAY / median(KWH_PER_DAY)) %>% ungroup()
+
+prof <- norm %>% select(NAME, MONTH, NORM) %>%
+  arrange(MONTH) %>%
+  pivot_wider(names_from = MONTH, values_from = NORM)
+X <- as.matrix(prof[, -1]); rownames(X) <- prof$NAME
+
+hc <- hclust(dist(X), method = "ward.D2")
+prof_cl <- data.frame(NAME = prof$NAME, CLUSTER = cutree(hc, k = 5))
+```
+
+```{r fig.height=6}
+plot_df <- norm %>% inner_join(prof_cl, by = "NAME") %>%
+  group_by(CLUSTER) %>% mutate(LABEL = paste0("Groupe ", CLUSTER, " (", n_distinct(NAME), " sites)")) %>%
+  ungroup()
+
+ggplot(plot_df, aes(MONTH, NORM)) +
+  geom_line(aes(group = NAME), colour = "grey80", linewidth = 0.3) +
+  stat_summary(fun = mean, geom = "line", linewidth = 0.9) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  facet_wrap(~ LABEL, ncol = 2) +
+  coord_cartesian(ylim = c(0, 3)) +
+  labs(title = "Profils de consommation par groupe",
+       subtitle = "Gris : sites individuels ; noir : profil moyen du groupe",
+       x = NULL, y = "kWh/jour rapporté à la médiane du site") +
+  theme_minimal()
+```
+
+```{r}
+prof_cl %>% group_by(CLUSTER) %>%
+  summarise(n = n(), Sites = ifelse(n() <= 5, paste(NAME, collapse = ", "), "–")) %>%
+  kable(col.names = c("Groupe", "Nombre de sites", "Sites"), align = c("c", "r", "l"),
+        booktabs = TRUE, caption = "Composition des groupes de profils")
+```
