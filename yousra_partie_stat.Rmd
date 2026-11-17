@@ -20,6 +20,7 @@ library(tidyr)
 library(ggplot2)
 library(lubridate)
 library(knitr)
+library(cluster)
 
 # French number formatting for tables: 2 500,3
 fr <- function(x, d = 0) formatC(x, format = "f", digits = d, big.mark = " ", decimal.mark = ",")
@@ -248,13 +249,22 @@ ggplot(std, aes(KWH_PERIOD)) + geom_histogram(binwidth = 250) +
 ```
 L’histogramme des 90 sites montre une distribution qui n’est pas symétrique. On distingue un pic principal autour de 2 500–2 750 kWh, correspondant au site typique, et un second pic, plus faible, autour de 750–1 000 kWh, qui correspond à un groupe de sites plus petits. C’est ce second groupe qui place la moyenne (2 080 kWh) légèrement sous la médiane (2 195 kWh). Au-delà de 3 000 kWh, les observations deviennent rares, et aucune n’apparaît entre 4 500 et 5 500 kWh. Le petit groupe isolé autour de 6 000 kWh correspond à un seul site, 1001BB, nettement plus consommateur que les autres. Cette distribution suggère que les 90 sites ne forment pas un ensemble homogène, ce qui motive la segmentation présentée plus loin.
 
+
 ## 2.6 Segmentation des sites
+
+Les 90 sites se répartissent en quelques profils types, ce qui permet de comparer chaque site à des sites similaires. Utilité de la segmentation :
+
+- **Détection d'erreurs** : un changement observé en même temps sur plusieurs sites similaires est probablement réel (ajout d'équipements, par exemple), alors qu'un écart propre à un seul site est suspect. Les seuils d'alerte peuvent aussi être adaptés à la taille des sites.
+- **Prévision** : chaque profil appelle un modèle différent (tendance pour les sites en croissance, modèle simple pour les sites stables, niveau actuel uniquement pour les sites ayant changé de niveau).
 
 ### Par niveau de consommation
 
+*Méthode : k-means sur le logarithme de la consommation médiane ; le nombre de groupes est justifié en annexe.*
+
 ```{r}
-set.seed(123)
 level <- std %>% group_by(NAME) %>% summarise(med = median(KWH_PERIOD))
+
+set.seed(123)
 km <- kmeans(log(level$med), centers = 2, nstart = 25)
 level$LEVEL <- ifelse(km$cluster == which.min(km$centers), "Petits sites", "Sites standards")
 
@@ -264,10 +274,16 @@ level %>% group_by(LEVEL) %>%
             `Médiane la plus basse` = fr(min), `Médiane du segment` = fr(med_seg),
             `Médiane la plus haute` = fr(max)) %>%
   kable(align = c("l", rep("r", 4)), booktabs = TRUE,
-        caption = "Segmentation des 90 sites par niveau de consommation (k-means sur le log de la médiane, kWh/mois)")
+        caption = "Segmentation des 90 sites par niveau de consommation (kWh/mois)")
 ```
 
+Le parc se divise en deux tailles de sites : 28 petits sites (médiane entre 544 et 1 561 kWh/mois) et 62 sites standards (1 650 à 6 236 kWh/mois). Ce découpage correspond aux deux pics observés dans la distribution. Il permettra de fixer des seuils d'alerte adaptés : un écart de 300 kWh est anormal pour un petit site, mais courant pour un site standard.
+
 ### Par profil de consommation
+
+Selon l'évolution de leur consommation, les sites se répartissent en cinq groupes. La consommation de chaque site est rapportée à sa médiane, afin de comparer les évolutions indépendamment de la taille.
+
+*Méthode : classification ascendante hiérarchique (Ward) ; le choix de cinq groupes est justifié en annexe.*
 
 ```{r}
 norm <- std %>% group_by(NAME) %>%
@@ -278,13 +294,15 @@ prof <- norm %>% select(NAME, MONTH, NORM) %>%
   pivot_wider(names_from = MONTH, values_from = NORM)
 X <- as.matrix(prof[, -1]); rownames(X) <- prof$NAME
 
-hc <- hclust(dist(X), method = "ward.D2")
+d  <- dist(X)
+hc <- hclust(d, method = "ward.D2")
 prof_cl <- data.frame(NAME = prof$NAME, CLUSTER = cutree(hc, k = 5))
 ```
 
 ```{r fig.height=6}
 plot_df <- norm %>% inner_join(prof_cl, by = "NAME") %>%
-  group_by(CLUSTER) %>% mutate(LABEL = paste0("Groupe ", CLUSTER, " (", n_distinct(NAME), " sites)")) %>%
+  group_by(CLUSTER) %>%
+  mutate(LABEL = paste0("Groupe ", CLUSTER, " (", n_distinct(NAME), " sites)")) %>%
   ungroup()
 
 ggplot(plot_df, aes(MONTH, NORM)) +
@@ -305,3 +323,5 @@ prof_cl %>% group_by(CLUSTER) %>%
   kable(col.names = c("Groupe", "Nombre de sites", "Sites"), align = c("c", "r", "l"),
         booktabs = TRUE, caption = "Composition des groupes de profils")
 ```
+
+- **54 sites en croissance régulière** (environ +6 % par an) : ce
