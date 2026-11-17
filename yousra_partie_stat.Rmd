@@ -68,47 +68,8 @@ kable(overview, col.names = c("", ""), align = c("l", "r"), booktabs = TRUE,
 ```
 
 # 2. Compréhension des données et statistiques descriptives:
-## 2.1 Périodes de facturation irrégulières
 
-```{r}
-irregular %>%
-  transmute(Site = NAME,
-            `Début` = format(BEGIN, "%d/%m/%Y"),
-            Fin = format(END, "%d/%m/%Y"),
-            Jours = DAYS,
-            kWh = fr(KWH_PERIOD)) %>%
-  kable(align = c("l", "c", "c", "r", "r"), booktabs = TRUE,
-        caption = "Périodes de facturation ne couvrant pas un mois calendaire complet")
-```
-
-Selon le tableau, seules deux factures ne couvrent pas un mois calendaire complet.
-
-### Cas 1 : 0628BR
-```{r}
-df %>%
-  filter(NAME == "0628BR", MONTH >= as.Date("2021-06-01")) %>%
-  transmute(`Début` = format(BEGIN, "%d/%m/%Y"),
-            Fin = format(END, "%d/%m/%Y"),
-            Jours = DAYS,
-            kWh = fr(KWH_PERIOD),
-            `kWh/jour` = fr(KWH_PER_DAY, 1)) %>%
-  kable(align = c("c", "c", "r", "r", "r"), booktabs = TRUE,
-        caption = "Site 0628BR, juin–novembre 2021")
-```
-
-Pour le site 0628BR, la facture de septembre 2021 est du même ordre que celles des autres mois (687 kWh), alors qu'elle ne couvre que 16 jours au lieu d'un mois complet.
-
-
-Cela laisse penser à une erreur de facturation, qui peut s'interpréter de deux façons :
-
-- soit la date de début est erronée et a été enregistrée au 15/09 au lieu du 01/09. Comme le montant de 687 kWh correspond à celui des autres mois, cette hypothèse paraît plausible
-- soit la période du 01/09 au 14/09 n’a pas été facturée, et le site a consommé en deux semaines l’équivalent d’un mois d’énergie, soit une consommation journalière presque doublée. Ces deux événements simultanés sont peu probables : nous retenons donc la première interprétation.
-
-### Cas 2 : 0089KO
-
-La facture de février 2020 s’arrête au 28/02, alors que 2020 est une année bissextile : le 29 février n’est donc couvert par aucune facture, puisque celle de mars commence le 01/03. L’écart ne représente qu’une journée (environ 78 kWh, soit 3,5 % du mois) et la consommation journalière reste cohérente avec les mois voisins. Nous considérons donc cet écart comme négligeable et conservons cette ligne telle quelle.
-
-## 2.2 Niveau de consommation par site
+## 2.1 Niveau de consommation par site
 ```{r}
 site_median <- df %>% group_by(NAME) %>% summarise(med = median(KWH_PERIOD)) %>%
   arrange(desc(med))
@@ -136,7 +97,7 @@ Le tableau 4 classe les sites selon leur consommation mensuelle médiane. Deux s
 
 Ces deux sites ne sont donc pas simplement « plus gros » : ils relèvent d’un autre ordre de grandeur. Bien qu’ils ne représentent que 2 % des sites, ils concentrent `r fr(100*share)` % de l’énergie facturée. Les inclure dans les statistiques globales masquerait le comportement d’un site typique ; nous les analysons donc séparément dans la suite du rapport. Le seuil retenu pour les isoler (100 000 kWh/mois de médiane) n’a pas d’importance particulière : toute valeur comprise entre environ 6 000 et 350 000 kWh isole les deux mêmes sites.
 
-## 2.3 Statistiques globales
+## 2.2 Statistiques globales
 ```{r}
 describe <- function(x) c(min(x), quantile(x, .25), median(x), mean(x),
                           quantile(x, .75), max(x), sd(x))
@@ -153,7 +114,7 @@ Le minimum n’est pas nul : aucun mois n’a donc été facturé à 0 kWh. En r
 
 Les deux grands sites consomment entre 304 260 et 593 585 kWh par mois. Leur moyenne (395 087 kWh) dépasse leur médiane d’environ 30 000 kWh, sous l’effet des valeurs les plus élevées. Ces valeurs proviennent de 0698BR, dont la consommation augmente fortement en 2021 : d’environ 405 000 kWh en février, elle atteint près de 590 000 kWh en juillet–août. Il ne s’agit donc pas d’un pic isolé mais d’une hausse durable, que l’on retrouvera dans l’analyse temporelle.
 
-## 2.4 Statistiques par site
+## 2.3 Statistiques par site
 ```{r}
 site_stats <- df %>% group_by(NAME, GROUP) %>%
   summarise(mean = mean(KWH_PERIOD), median = median(KWH_PERIOD), sd = sd(KWH_PERIOD),
@@ -240,7 +201,7 @@ df %>% filter(NAME %in% odd_sites) %>%
 ```
 Le coefficient de variation permet donc de repérer les sites atypiques, mais pas de distinguer une rupture de niveau d’une anomalie ponctuelle. Ces sites seront examinés graphiquement dans la prochaine section.
 
-## 2.5 Distribution de la consommation.
+## 2.4 Distribution de la consommation.
 ```{r}
 ggplot(std, aes(KWH_PERIOD)) + geom_histogram(binwidth = 250) +
   scale_x_continuous(labels = scales::label_number(big.mark = " ")) +
@@ -250,7 +211,7 @@ ggplot(std, aes(KWH_PERIOD)) + geom_histogram(binwidth = 250) +
 L’histogramme des 90 sites montre une distribution qui n’est pas symétrique. On distingue un pic principal autour de 2 500–2 750 kWh, correspondant au site typique, et un second pic, plus faible, autour de 750–1 000 kWh, qui correspond à un groupe de sites plus petits. C’est ce second groupe qui place la moyenne (2 080 kWh) légèrement sous la médiane (2 195 kWh). Au-delà de 3 000 kWh, les observations deviennent rares, et aucune n’apparaît entre 4 500 et 5 500 kWh. Le petit groupe isolé autour de 6 000 kWh correspond à un seul site, 1001BB, nettement plus consommateur que les autres. Cette distribution suggère que les 90 sites ne forment pas un ensemble homogène, ce qui motive la segmentation présentée plus loin.
 
 
-## 2.6 Segmentation des sites
+## 2.5 Segmentation des sites
 
 Les 90 sites se répartissent en quelques profils types, ce qui permet de comparer chaque site à des sites similaires. Utilité de la segmentation :
 
