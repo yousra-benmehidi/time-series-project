@@ -2,7 +2,9 @@
 title: "Untitled"
 author: "Yousra Amel BENMEHIDI - Liliya SHEVALYE"
 date: "2026-11-17"
-output: pdf_document
+output:
+  pdf_document:
+    latex_engine: xelatex
 ---
 
 ```{r setup, include=FALSE}
@@ -39,8 +41,9 @@ df <- df %>%
 ```
 
 # 3. Détection des erreurs de facturation
+## 3.1 Contrôles de cohérence du jeu de données
 ```{r}
-# ---- 3.1 Contrôles de cohérence du jeu de données ----
+# ----  ----
 
 # Facture précédente du même site, pour vérifier la continuité
 chk <- df %>%
@@ -59,7 +62,6 @@ struct <- data.frame(
                  "Doublon (site, mois)",
                  "Mois manquant",
                  "Chevauchement avec la facture précédente",
-                 "Jours non couverts entre deux factures",
                  "Période ne couvrant pas un mois calendaire complet"),
   `Factures concernées` = c(sum(!complete.cases(df[c("NAME", "BEGIN", "END", "KWH_PERIOD")])),
                             sum(df$END < df$BEGIN),
@@ -67,7 +69,6 @@ struct <- data.frame(
                             sum(duplicated(df[c("NAME", "MONTH")])),
                             sum(35 - table(df$NAME)),
                             sum(chk$GAP < 0, na.rm = TRUE),
-                            sum(chk$GAP > 0, na.rm = TRUE),
                             nrow(irregular)),
   check.names = FALSE)
 
@@ -75,15 +76,9 @@ kable(struct, align = c("l", "r"), booktabs = TRUE,
       caption = "Contrôles de cohérence des factures")
 ```
 
+Les contrôles de cohérence ne révèlent que deux anomalies, qui concernent toutes deux la période facturée : deux factures ne couvrent pas un mois calendaire complet.
 
-
-
-
-
-## Erreurs structurelles
-Après avoir effectué une analyse approfondie du jeu de données afin de mettre en évidence les anomalies, seules deux factures ne couvrent pas un mois calendaire complet.
-
-### Cas 1 : 0628BR
+### Cas 1 : 0628BR (septembre 2021)
 ```{r}
 df %>%
   filter(NAME == "0628BR", MONTH >= as.Date("2021-06-01")) %>%
@@ -95,17 +90,21 @@ df %>%
   kable(align = c("c", "c", "r", "r", "r"), booktabs = TRUE,
         caption = "Site 0628BR, juin–novembre 2021")
 ```
-Pour le site 0628BR, la facture de septembre 2021 est du même ordre que celles des autres mois (687 kWh), alors qu'elle ne couvre que 16 jours au lieu d'un mois complet.
+La facture de septembre 2021 couvre seulement 16 jours (du 15/09 au 30/09), mais son volume (687 kWh) est du même ordre que celui d’un mois complet. Cela représente environ 43 kWh/jour, contre environ 23 kWh/jour habituellement.
+
+Deux explications sont possibles :
 
 
-Cela laisse penser à une erreur de facturation, qui peut s'interpréter de deux façons :
+- Date de début erronée : la facture couvre en réalité tout le mois, et sa date de début a été saisie au 15/09 au lieu du 01/09. Le volume, cohérent avec les autres mois, va dans ce sens.
+- Période non facturée : les 14 premiers jours du mois n’ont pas été facturés. Il faudrait alors que la consommation journalière ait presque doublé au même moment, ce qui est peu probable.
 
-- soit la date de début est erronée et a été enregistrée au 15/09 au lieu du 01/09. Comme le montant de 687 kWh correspond à celui des autres mois, cette hypothèse paraît plausible
-- soit la période du 01/09 au 14/09 n’a pas été facturée, et le site a consommé en deux semaines l’équivalent d’un mois d’énergie, soit une consommation journalière presque doublée. Ces deux événements simultanés sont peu probables : nous retenons donc la première interprétation.
+Décision : nous retenons la première hypothèse. La date de début est ramenée au 01/09/2021 et le volume reste inchangé.
 
-### Cas 2 : 0089KO
+### Cas 2 : 0089KO (février 2020)
 
-La facture de février 2020 s’arrête au 28/02, alors que 2020 est une année bissextile : le 29 février n’est donc couvert par aucune facture, puisque celle de mars commence le 01/03. L’écart ne représente qu’une journée (environ 78 kWh, soit 3,5 % du mois) et la consommation journalière reste cohérente avec les mois voisins. Nous considérons donc cet écart comme négligeable et conservons cette ligne telle quelle.
+La facture de février 2020 s’arrête au 28/02 alors que 2020 est bissextile, et celle de mars commence au 01/03. Le 29 février n’est donc couvert par aucune facture. L’écart est d’une seule journée (environ 78 kWh, soit 3,5 % du mois), et la consommation journalière reste cohérente avec les mois voisins.
+
+Décision : l’écart est jugé négligeable et la facture est conservée telle quelle.
 ```{r}
 # Correction : date de début de 0628BR ramenée au 01/09/2021 (quantité inchangée)
 # 0089KO (29/02/2020 non couvert) est conservé tel quel : écart négligeable
@@ -149,7 +148,7 @@ glob %>%
   kable(align = c("l", "r", "r"), booktabs = TRUE,
         caption = "Factures aberrantes au sens global (|M| > 3,5 et écart > 20 % à la médiane du site)")
 ```
-144 factures, réparties sur 32 sites, présentent un écart important par rapport au niveau habituel de leur site. Seuls 6 de ces sites figuraient parmi les 10 sites les plus variables identifiés en section 2.3 : l’analyse au niveau de la facture fait donc apparaître 26 sites supplémentaires à examiner, dont les anomalies étaient trop ponctuelles pour être visibles à l’échelle du site.
+Ce premier filtre signale 144 factures sur 32 sites. La plupart de ces sites (26 sur 32) n’étaient pas repérés par l’analyse de variabilité de la section 2.3 : leurs anomalies, trop ponctuelles, ne ressortent qu’au niveau de la facture.
 ```{r fig.height=3.2}
 glob_ex <- c("0274BR", "1037KO")
 ggplot(filter(glob, NAME %in% glob_ex), aes(MONTH, KWH_PER_DAY)) +
@@ -163,9 +162,237 @@ ggplot(filter(glob, NAME %in% glob_ex), aes(MONTH, KWH_PER_DAY)) +
        subtitle = "Pointillés : médiane du site", x = NULL, y = "kWh/jour") +
   theme_minimal() + theme(legend.position = "bottom")
 ```
-Ces factures ne sont pas toutes des erreurs. Deux situations très différentes apparaissent :
+Les factures signalées relèvent de deux situations très différentes :
 
-des écarts isolés, comme 0274BR en juin 2021 : un seul mois environ 20 % au-dessus du niveau habituel, sur un site par ailleurs très stable. Ce sont les cas les plus susceptibles de correspondre à une erreur de facturation ;
-des changements durables de consommation, comme 1037KO, dont les 15 factures signalées s’expliquent par une baisse de consommation à partir de septembre 2020. Ce type de changement relève plutôt d’une évolution réelle du site (retrait d’équipements, par exemple).
 
-À l’inverse, certains sites ayant fortement changé de niveau, comme 1088KO ou 1978KO, ne sont pas signalés du tout. Pour distinguer les erreurs ponctuelles des évolutions réelles, la section suivante (3.3) compare chaque facture aux mois qui l’entourent.
+- des écarts isolés, comme 0274BR en juin 2021 : un seul mois nettement au-dessus du niveau habituel, sur un site par ailleurs très stable. Ce sont les cas les plus susceptibles de correspondre à une erreur de facturation ;
+- des changements durables de consommation, comme 1037KO, dont les 15 factures signalées s’expliquent par une baisse de consommation à partir de septembre 2020. Ce type de changement relève plutôt d’une évolution réelle du site (retrait d’équipements, par exemple).
+
+À l’inverse, certains sites ayant fortement changé de niveau, comme 1088KO ou 1978KO, ne sont pas signalés du tout : leur changement de niveau élargit la dispersion de leur consommation, ce qui masque les écarts. Pour distinguer les erreurs ponctuelles des évolutions réelles, la section 3.3 compare chaque facture aux mois qui l’entourent.
+
+#3.3 Valeurs aberrantes contextuelles
+```{r}
+# ---- 3.3 Valeurs aberrantes locales ----
+
+# Médiane des mois voisins (±3 mois, facture elle-même exclue).
+# En début/fin de série, la fenêtre est plus courte (3 voisins minimum).
+local_median <- function(x, k = 3, min_n = 3) {
+  n <- length(x)
+  sapply(seq_len(n), function(i) {
+    idx <- setdiff(max(1, i - k):min(n, i + k), i)
+    if (length(idx) < min_n) NA_real_ else median(x[idx])
+  })
+}
+
+loc <- glob %>%
+  arrange(NAME, MONTH) %>%
+  group_by(NAME) %>%
+  mutate(LOC_MED = local_median(KWH_PER_DAY),
+         RES     = KWH_PER_DAY - LOC_MED,               # écart au niveau local
+         M_LOC   = 0.6745 * (RES - median(RES, na.rm = TRUE)) /
+                   mad(RES, constant = 1, na.rm = TRUE), # score robuste des écarts du site
+         LOCAL   = coalesce(abs(M_LOC) > 3.5 &
+                            abs(KWH_PER_DAY / LOC_MED - 1) > 0.2, FALSE)) %>%
+  ungroup()
+
+# Croisement avec la méthode globale (3.2)
+loc %>%
+  filter(GLOBAL | LOCAL) %>%
+  mutate(`Catégorie` = case_when(GLOBAL & LOCAL ~ "Signalée par les deux méthodes",
+                                 LOCAL          ~ "Locale uniquement",
+                                 TRUE           ~ "Globale uniquement")) %>%
+  group_by(`Catégorie`) %>%
+  summarise(Sites = n_distinct(NAME), `Factures` = n()) %>%
+  kable(align = c("l", "r", "r"), booktabs = TRUE,
+        caption = "Factures signalées selon la méthode (|M| > 3,5 et écart > 20 %)")
+```
+```{r}
+# 1. Les 19 factures prioritaires
+loc %>% filter(GLOBAL & LOCAL) %>%
+  select(NAME, MONTH, KWH_PER_DAY, LOC_MED, MED) %>% arrange(NAME, MONTH)
+
+# 2. Les cas témoins : 1037KO doit quasi disparaître, 1088KO / 1978KO doivent apparaître
+loc %>% filter(NAME %in% c("1037KO", "1088KO", "1978KO")) %>%
+  summarise(Global = sum(GLOBAL), Local = sum(LOCAL), .by = NAME)
+```
+Les 19 factures signalées par les deux méthodes se regroupent en cinq situations, résumées dans le tableau de synthèse (section 3.4).
+
+### 1. Sous-facturation suivie d’une régularisation : 0089KO (juin et août 2019)
+
+La facture de juin 2019 est quasi nulle (6,7 kWh/jour, contre environ 50 habituellement). Celle d’août est plus de deux fois supérieure à la normale (166 kWh/jour). Ce schéma évoque un relevé manquant ou sous-estimé en juin, régularisé en août. La régularisation n’est toutefois que partielle : l’excédent d’août (environ 3 200 kWh) dépasse largement le déficit de juin (environ 1 300 kWh). Les quelque 1 900 kWh restants restent inexpliqués.
+
+Action : vérifier les relevés de juin à août 2019 auprès du fournisseur. Prévision : les deux mois sont remplacés par la médiane des mois voisins.
+
+### 2. Facturation erratique sur l’année 2019 : 0254BB (6 factures)
+
+Tout au long de 2019, la consommation de ce site alterne des hausses et des baisses de 40 à 90 %, avant de se stabiliser à un niveau plus bas à partir de 2020. Plutôt qu’une série d’erreurs indépendantes, ce schéma correspond à une période de facturation sur estimation, corrigée progressivement par les relevés réels.
+
+Action : contrôler les factures 2019 du site. Prévision : l’année 2019 n’est pas jugée fiable et l’apprentissage démarre en 2020.
+
+### 3. Interruption ponctuelle : 1240BR (mai 2021)
+
+La facture de mai 2021 est quasi nulle (4,5 kWh/jour), alors que les mois qui l’entourent sont à un niveau normal. Il s’agit donc d’un arrêt temporaire et non d’un changement durable : coupure ou travaux sur le site, panne du compteur, ou relevé manquant.
+
+Action : vérifier auprès de l’exploitant si le site a été à l’arrêt. Prévision : la valeur est remplacée par la médiane des mois voisins.
+
+### 4. Écarts modérés : 0274BR, 0690BR, 1009KO, 1067KO, 0573BB, 1911BB
+
+Ces factures s’écartent de 20 à 30 % de leurs mois voisins, en hausse ou en baisse. Ces écarts restent compatibles avec une variation normale d’activité ou une estimation légèrement imprécise. Ils ne constituent pas des erreurs avérées.
+
+Action : aucune, faible priorité. Prévision : les valeurs sont conservées.
+
+### 5. Début ou fin de série, non confirmables : 0489KO, 1018KO, 0007BR, 1006BB
+
+Ces factures concernent le premier mois (janvier 2019) ou le dernier mois (novembre 2021) de la série. Elles ne peuvent être comparées qu’aux mois situés d’un seul côté, et l’anomalie ne peut donc pas être confirmée. Pour 0489KO (−61 %), une mise en service en cours de mois est plausible. Pour 0007BR et 1006BB (+22 % et +30 %), seule la facture de décembre 2021 permettra de distinguer une erreur d’un nouveau niveau de consommation.
+
+Action : contrôler à réception de la facture de décembre. Prévision : les valeurs sont conservées, mais les prévisions de 0007BR et 1006BB seront présentées avec une incertitude plus large.
+
+La figure ci-dessous illustre les trois cas les plus marqués : 0089KO (cas 1), 0254BB (cas 2) et 1240BR (cas 3).
+```{r}
+# Série d'un site autour d'un épisode, avec l'écart en kWh par rapport à la médiane locale
+episode <- function(site, from, to) {
+  loc %>%
+    filter(NAME == site, MONTH >= as.Date(from), MONTH <= as.Date(to)) %>%
+    transmute(Mois             = format(MONTH, "%m/%Y"),
+              Jours            = DAYS,
+              `kWh/jour`       = round(KWH_PER_DAY, 1),
+              `Médiane locale` = round(LOC_MED, 1),
+              `Écart (kWh)`    = round((KWH_PER_DAY - LOC_MED) * DAYS),
+              `Signalée`       = if_else(LOCAL, "oui", ""))
+}
+
+episode("0089KO", "2019-03-01", "2019-11-01")   # cas 1 : la régularisation est-elle complète ?
+episode("0254BB", "2019-01-01", "2020-03-01")   # cas 2 : instabilité sur 2019, stabilisation en 2020 ?
+episode("1240BR", "2021-02-01", "2021-11-01")   # cas 3 : y a-t-il un rattrapage après mai ?
+
+# Graphique des trois cas les plus marqués
+ggplot(filter(loc, NAME %in% c("0089KO", "0254BB", "1240BR")), aes(MONTH, KWH_PER_DAY)) +
+  geom_line(colour = "grey50") +
+  geom_line(aes(y = LOC_MED), linetype = "dashed") +
+  geom_point(aes(colour = LOCAL), size = 1.3) +
+  facet_wrap(~ NAME, scales = "free_y") +
+  scale_colour_manual(values = c(`FALSE` = "grey50", `TRUE` = "red"), guide = "none") +
+  labs(title = "Cas 1 à 3 : consommation journalière et médiane des mois voisins",
+       subtitle = "Points rouges : factures signalées · Pointillés : médiane des mois voisins",
+       x = NULL, y = "kWh/jour") +
+  theme_minimal()
+```
+
+```{r}
+# Factures signalées uniquement par la comparaison aux mois voisins (12)
+first_m <- min(loc$MONTH)
+last_m  <- max(loc$MONTH)
+
+loc %>%
+  filter(LOCAL & !GLOBAL) %>%
+  arrange(NAME, MONTH) %>%
+  transmute(Site             = NAME,
+            Mois             = format(MONTH, "%m/%Y"),
+            `kWh/jour`       = round(KWH_PER_DAY, 1),
+            `Médiane locale` = round(LOC_MED, 1),
+            `Médiane site`   = round(MED, 1),
+            `Écart local`    = paste0(round(100 * (KWH_PER_DAY / LOC_MED - 1)), " %"),
+            `Écart (kWh)`    = round((KWH_PER_DAY - LOC_MED) * DAYS),
+            Position         = case_when(MONTH == first_m ~ "Premier mois",
+                                         MONTH == last_m  ~ "Dernier mois",
+                                         TRUE             ~ "")) %>%
+  kable(align = c("l", "c", rep("r", 5), "l"), booktabs = TRUE,
+        caption = "Factures signalées uniquement par la comparaison aux mois voisins")
+```
+La comparaison aux mois voisins signale en outre 12 factures que la comparaison au niveau habituel du site n’avait pas repérées. La plupart se rattachent aux situations décrites ci-dessus, ou correspondent à des changements de niveau de consommation.
+
+Relevé décalé d’un mois : 0690BR (mars et avril 2021)
+
+La facture d’avril 2021 est inférieure à la normale, juste après une facture de mars supérieure à la normale. Sur les deux mois, les écarts se compensent : il s’agit vraisemblablement d’un relevé décalé d’un mois à l’autre, sans effet notable sur le total facturé. Ce cas relève de la situation 1.
+
+Action : aucune sur le montant total. Prévision : les deux mois sont remplacés par la médiane des mois voisins.
+
+Écarts modérés isolés : 0356KO, 0495BR, 1002KO, 2106BB
+
+Ces factures s’écartent de 20 à 30 % de leurs mois voisins, sans schéma particulier. Comme pour la situation 4, ces écarts restent compatibles avec une variation normale d’activité.
+
+Action : aucune, faible priorité. Prévision : les valeurs sont conservées.
+
+Changements de niveau : 1067KO, 1088KO, 1978KO, 1240BR (avril 2021)
+
+Pour ces sites, la facture signalée correspond au moment où la consommation change durablement de niveau. Par exemple, 1088KO passe d’environ 800 à plus de 2 000 kWh/jour à partir de [mois/année]. La comparaison aux mois voisins signale alors le mois de transition, car il est entouré de mois situés à deux niveaux différents. Il ne s’agit pas d’erreurs de facturation, mais d’évolutions réelles de l’activité des sites.
+
+Pour 1240BR, la baisse de niveau coïncide avec la facture quasi nulle de mai 2021 (situation 3). L’interruption suivie d’une consommation durablement plus faible évoque des travaux sur le site, par exemple le retrait d’équipements, plutôt qu’une simple panne de compteur.
+
+Action : aucune sur la facturation ; confirmer les changements auprès de l’exploitant si nécessaire. Prévision : seul l’historique postérieur au changement est utilisé pour l’apprentissage.
+
+Variation saisonnière : 0480BR
+
+Ce site présente une saisonnalité marquée : sa consommation augmente chaque hiver. L’écart détecté correspond à un mois d’hiver normal pour ce site. La méthode ne tenant pas compte de la saisonnalité, ce type de cas constitue l’une de ses limites.
+
+
+La figure ci-dessous illustre ces situations : relevé décalé (0690BR), changements de niveau (1067KO, 1240BR) et variation saisonnière (0480BR).
+```{r}
+ex_12 <- c("0690BR", "1067KO", "1240BR", "0480BR")   # ordre de présentation dans le texte
+
+ggplot(filter(loc, NAME %in% ex_12), aes(MONTH, KWH_PER_DAY)) +
+  geom_line(colour = "grey50") +
+  geom_line(aes(y = LOC_MED), linetype = "dashed") +
+  geom_hline(aes(yintercept = MED), linetype = "dotted", colour = "steelblue") +
+  geom_point(aes(colour = case_when(GLOBAL & LOCAL ~ "Deux méthodes",
+                                    LOCAL          ~ "Mois voisins uniquement",
+                                    GLOBAL         ~ "Niveau du site uniquement",
+                                    TRUE           ~ "Normale")),
+             size = 1.5) +
+  facet_wrap(~ factor(NAME, levels = ex_12), ncol = 2, scales = "free_y") +
+  scale_colour_manual(values = c(`Deux méthodes`             = "red",
+                                 `Mois voisins uniquement`   = "orange",
+                                 `Niveau du site uniquement` = "steelblue",
+                                 `Normale`                   = "grey50"),
+                      name = NULL) +
+  labs(title = "Factures signalées par la comparaison aux mois voisins : exemples",
+       subtitle = "Tirets : médiane des mois voisins · Pointillés bleus : médiane du site",
+       x = NULL, y = "kWh/jour") +
+  theme_minimal() + theme(legend.position = "bottom")
+```
+# 3.4 Synthèse et corrections
+```{r}
+# ---- ----
+first_m <- min(loc$MONTH)
+last_m  <- max(loc$MONTH)
+
+# Type attribué à chaque facture signalée (lecture des cas, section 3.3)
+type_site <- c("0089KO" = "Sous-facturation puis régularisation",
+               "0690BR" = "Relevé décalé",
+               "0254BB" = "Facturation erratique",
+               "1067KO" = "Changement de niveau",
+               "1088KO" = "Changement de niveau",
+               "1978KO" = "Changement de niveau",
+               "0480BR" = "Variation saisonnière")
+
+flags <- loc %>%
+  filter(LOCAL) %>%
+  mutate(Type = case_when(
+    NAME == "1240BR" & MONTH == as.Date("2021-05-01") ~ "Interruption ponctuelle",
+    NAME == "1240BR"                                  ~ "Changement de niveau",
+    NAME %in% names(type_site)                        ~ unname(type_site[NAME]),
+    MONTH %in% c(first_m, last_m)                     ~ "Début ou fin de série",
+    TRUE                                              ~ "Écart modéré"))
+
+# Décision associée à chaque type
+decisions <- tribble(
+  ~Type,                                  ~`Priorité`, ~`Action métier`,                         ~`Traitement prévision`,
+  "Sous-facturation puis régularisation", "Haute",     "Vérifier les relevés auprès du fournisseur", "Remplacée par la médiane locale",
+  "Facturation erratique",                "Haute",     "Contrôler les factures de l'année",        "Apprentissage à partir de 2020",
+  "Interruption ponctuelle",              "Haute",     "Vérifier un arrêt du site",                "Exclue (avant le changement de niveau)",
+  "Relevé décalé",                        "Faible",    "Aucune (total inchangé)",                  "Remplacée par la médiane locale",
+  "Début ou fin de série",                "Moyenne",   "Contrôler à réception de décembre",        "Conservée, incertitude élargie",
+  "Écart modéré",                         "Faible",    "Aucune",                                   "Conservée",
+  "Changement de niveau",                 "—",         "Confirmer auprès de l'exploitant",         "Apprentissage après le changement",
+  "Variation saisonnière",                "—",         "Aucune",                                   "Conservée")
+
+flags %>%
+  group_by(Type) %>%
+  summarise(Sites = paste(sort(unique(NAME)), collapse = ", "), Factures = n()) %>%
+  left_join(decisions, by = "Type") %>%
+  arrange(match(Type, decisions$Type)) %>%
+  kable(booktabs = TRUE, caption = "Synthèse des factures signalées et décisions associées")
+```
+
+
+
