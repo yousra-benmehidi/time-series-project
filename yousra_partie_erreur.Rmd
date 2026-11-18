@@ -1,0 +1,171 @@
+---
+title: "Untitled"
+author: "Yousra Amel BENMEHIDI - Liliya SHEVALYE"
+date: "2026-11-17"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 7, fig.height = 3.5)
+```
+
+```{r include=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+library(knitr)
+library(cluster)
+
+# French number formatting for tables: 2 500,3
+fr <- function(x, d = 0) formatC(x, format = "f", digits = d, big.mark = " ", decimal.mark = ",")
+```
+
+```{r}
+df <- read.csv("TimeSeries.csv", header = TRUE, sep = ",")
+
+df <- df %>%
+  mutate(
+    KWH_PERIOD  = as.numeric(gsub("\\s", "", KWH_PERIOD)),  # "2 500" -> 2500
+    BEGIN       = dmy(BEGIN),                                # dd/mm/yyyy
+    END         = dmy(END),
+    DAYS        = as.numeric(END - BEGIN) + 1,               # length of billing period
+    KWH_PER_DAY = KWH_PERIOD / DAYS,                         # normalizes Feb vs 31-day months
+    MONTH       = floor_date(BEGIN, "month"),                # first day of the month
+    GROUP       = substr(NAME, nchar(NAME) - 1, nchar(NAME)) # BB / BR / KO suffix
+  ) %>%
+  arrange(NAME, MONTH)
+```
+
+# 3. Détection des erreurs de facturation
+```{r}
+# ---- 3.1 Contrôles de cohérence du jeu de données ----
+
+# Facture précédente du même site, pour vérifier la continuité
+chk <- df %>%
+  group_by(NAME) %>%
+  mutate(GAP = as.numeric(BEGIN - lag(END)) - 1) %>%  # jours non couverts (0 = continu, < 0 = chevauchement)
+  ungroup()
+
+# Périodes ne couvrant pas un mois calendaire complet (utilisé dans le tableau suivant)
+irregular <- df %>%
+  filter(day(BEGIN) != 1 | END != ceiling_date(BEGIN, "month") - days(1))
+
+struct <- data.frame(
+  `Contrôle` = c("Valeurs manquantes",
+                 "Date de fin antérieure à la date de début",
+                 "Consommation nulle ou négative",
+                 "Doublon (site, mois)",
+                 "Mois manquant",
+                 "Chevauchement avec la facture précédente",
+                 "Jours non couverts entre deux factures",
+                 "Période ne couvrant pas un mois calendaire complet"),
+  `Factures concernées` = c(sum(!complete.cases(df[c("NAME", "BEGIN", "END", "KWH_PERIOD")])),
+                            sum(df$END < df$BEGIN),
+                            sum(df$KWH_PERIOD <= 0),
+                            sum(duplicated(df[c("NAME", "MONTH")])),
+                            sum(35 - table(df$NAME)),
+                            sum(chk$GAP < 0, na.rm = TRUE),
+                            sum(chk$GAP > 0, na.rm = TRUE),
+                            nrow(irregular)),
+  check.names = FALSE)
+
+kable(struct, align = c("l", "r"), booktabs = TRUE,
+      caption = "Contrôles de cohérence des factures")
+```
+
+
+
+
+
+
+## Erreurs structurelles
+Après avoir effectué une analyse approfondie du jeu de données afin de mettre en évidence les anomalies, seules deux factures ne couvrent pas un mois calendaire complet.
+
+### Cas 1 : 0628BR
+```{r}
+df %>%
+  filter(NAME == "0628BR", MONTH >= as.Date("2021-06-01")) %>%
+  transmute(`Début` = format(BEGIN, "%d/%m/%Y"),
+            Fin = format(END, "%d/%m/%Y"),
+            Jours = DAYS,
+            kWh = fr(KWH_PERIOD),
+            `kWh/jour` = fr(KWH_PER_DAY, 1)) %>%
+  kable(align = c("c", "c", "r", "r", "r"), booktabs = TRUE,
+        caption = "Site 0628BR, juin–novembre 2021")
+```
+Pour le site 0628BR, la facture de septembre 2021 est du même ordre que celles des autres mois (687 kWh), alors qu'elle ne couvre que 16 jours au lieu d'un mois complet.
+
+
+Cela laisse penser à une erreur de facturation, qui peut s'interpréter de deux façons :
+
+- soit la date de début est erronée et a été enregistrée au 15/09 au lieu du 01/09. Comme le montant de 687 kWh correspond à celui des autres mois, cette hypothèse paraît plausible
+- soit la période du 01/09 au 14/09 n’a pas été facturée, et le site a consommé en deux semaines l’équivalent d’un mois d’énergie, soit une consommation journalière presque doublée. Ces deux événements simultanés sont peu probables : nous retenons donc la première interprétation.
+
+### Cas 2 : 0089KO
+
+La facture de février 2020 s’arrête au 28/02, alors que 2020 est une année bissextile : le 29 février n’est donc couvert par aucune facture, puisque celle de mars commence le 01/03. L’écart ne représente qu’une journée (environ 78 kWh, soit 3,5 % du mois) et la consommation journalière reste cohérente avec les mois voisins. Nous considérons donc cet écart comme négligeable et conservons cette ligne telle quelle.
+```{r}
+# Correction : date de début de 0628BR ramenée au 01/09/2021 (quantité inchangée)
+# 0089KO (29/02/2020 non couvert) est conservé tel quel : écart négligeable
+clean <- df %>%
+  mutate(FIX_DATE    = NAME == "0628BR" & MONTH == as.Date("2021-09-01"),
+         BEGIN       = if_else(FIX_DATE, as.Date("2021-09-01"), BEGIN),
+         DAYS        = as.numeric(END - BEGIN) + 1,
+         KWH_PER_DAY = KWH_PERIOD / DAYS)
+```
+
+## 3.2 Valeurs aberrantes globales
+L’analyse par site (section 2.3) a permis d’identifier les sites les plus variables, mais pas les factures concernées. Pour mesurer l’effet des anomalies sur la facturation, nous passons ici au niveau de la facture : chaque facture est comparée à la consommation habituelle de son site (en kWh par jour, pour neutraliser la longueur des mois). Une facture est signalée lorsqu’elle s’écarte nettement de ce niveau habituel
+
+```{r}
+
+# Score z modifié par site, en kWh/jour : M = 0,6745 * (x - médiane) / MAD
+glob <- clean %>%
+  group_by(NAME) %>%
+  mutate(MED    = median(KWH_PER_DAY),
+         M      = 0.6745 * (KWH_PER_DAY - MED) / mad(KWH_PER_DAY, constant = 1),
+         GLOBAL = abs(M) > 3.5 & abs(KWH_PER_DAY / MED - 1) > 0.2) %>%  # 2e critère : écart d'au moins 20 %
+  ungroup()
+
+# Comparaison avec les 10 sites les plus variables repérés en 2.3
+# Les 10 sites les plus variables repérés en 2.3 (coefficient de variation = écart-type / moyenne)
+top10_cv <- df %>%
+  group_by(NAME) %>%
+  summarise(cv = sd(KWH_PERIOD) / mean(KWH_PERIOD)) %>%
+  arrange(desc(cv)) %>%
+  head(10) %>%
+  pull(NAME)
+
+glob %>%
+  filter(GLOBAL) %>%
+  count(NAME) %>%
+  mutate(Groupe = if_else(NAME %in% top10_cv, "Parmi les 10 sites les plus variables (2.3)",
+                                               "Autres sites")) %>%
+  group_by(Groupe) %>%
+  summarise(`Sites` = n(), `Factures signalées` = sum(n)) %>%
+  arrange(desc(Groupe == "Autres sites")) %>%
+  kable(align = c("l", "r", "r"), booktabs = TRUE,
+        caption = "Factures aberrantes au sens global (|M| > 3,5 et écart > 20 % à la médiane du site)")
+```
+144 factures, réparties sur 32 sites, présentent un écart important par rapport au niveau habituel de leur site. Seuls 6 de ces sites figuraient parmi les 10 sites les plus variables identifiés en section 2.3 : l’analyse au niveau de la facture fait donc apparaître 26 sites supplémentaires à examiner, dont les anomalies étaient trop ponctuelles pour être visibles à l’échelle du site.
+```{r fig.height=3.2}
+glob_ex <- c("0274BR", "1037KO")
+ggplot(filter(glob, NAME %in% glob_ex), aes(MONTH, KWH_PER_DAY)) +
+  geom_line(colour = "grey50") +
+  geom_point(aes(colour = GLOBAL), size = 1.3) +
+  geom_hline(aes(yintercept = MED), linetype = "dashed") +
+  facet_wrap(~ NAME, scales = "free_y") +
+  scale_colour_manual(values = c(`FALSE` = "grey50", `TRUE` = "red"),
+                      labels = c("Normale", "Aberrante globale"), name = NULL) +
+  labs(title = "Valeurs aberrantes globales : deux sites absents du top 10 du CV",
+       subtitle = "Pointillés : médiane du site", x = NULL, y = "kWh/jour") +
+  theme_minimal() + theme(legend.position = "bottom")
+```
+Ces factures ne sont pas toutes des erreurs. Deux situations très différentes apparaissent :
+
+des écarts isolés, comme 0274BR en juin 2021 : un seul mois environ 20 % au-dessus du niveau habituel, sur un site par ailleurs très stable. Ce sont les cas les plus susceptibles de correspondre à une erreur de facturation ;
+des changements durables de consommation, comme 1037KO, dont les 15 factures signalées s’expliquent par une baisse de consommation à partir de septembre 2020. Ce type de changement relève plutôt d’une évolution réelle du site (retrait d’équipements, par exemple).
+
+À l’inverse, certains sites ayant fortement changé de niveau, comme 1088KO ou 1978KO, ne sont pas signalés du tout. Pour distinguer les erreurs ponctuelles des évolutions réelles, la section suivante (3.3) compare chaque facture aux mois qui l’entourent.
