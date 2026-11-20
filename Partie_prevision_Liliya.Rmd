@@ -1,0 +1,123 @@
+---
+title: "Stats R"
+author: "Liliya SHEVALYE et Sarah AZIRI"
+date: "2026-11-17"
+output: pdf_document
+---
+
+```{r, include=FALSE}
+library(dplyr)
+library(lubridate)
+library(fpp2)
+
+df <- read.csv("TimeSeries.csv", colClasses = "character")
+
+df$BEGIN <- dmy(df$BEGIN)
+df$END <- dmy(df$END)
+df$KWH_PERIOD <- as.numeric(
+  gsub("[[:space:]]", "", df$KWH_PERIOD)
+)
+```
+
+
+```{r}
+nrow(df)
+length(unique(df$NAME))
+summary(table(df$NAME))
+table(df$NAME)
+```
+
+```{r}
+summary(as.numeric(table(df$NAME)))
+```
+
+```{r}
+df$MONTH <- floor_date(df$BEGIN, "month")
+```
+
+```{r}
+str(df)
+```
+```{r}
+verification <- df %>%
+  group_by(NAME) %>%
+  summarise(
+    n_months = n_distinct(MONTH),
+    first = min(MONTH),
+    last = max(MONTH),
+    .groups = "drop"
+  )
+
+summary(verification$n_months)
+head(verification)
+```
+```{r}
+all(verification$n_months == 35 &
+    verification$first == as.Date("2019-01-01") &
+    verification$last == as.Date("2021-11-01"))
+```
+
+Я выделяю из 92 возможных сайтов только один, чтобы по нему провести первый тестовый анализ.
+
+```{r}
+site_0007BR <- df %>%
+  filter(NAME == "0007BR") %>%
+  arrange(MONTH)
+```
+
+```{r}
+serie_0007BR <- ts(
+  site_0007BR$KWH_PERIOD,
+  start = c(2019, 1),
+  frequency = 12
+)
+```
+
+```{r}
+class(serie_0007BR)
+start(serie_0007BR)
+end(serie_0007BR)
+```
+
+```{r}
+autoplot(serie_0007BR)
+```
+
+```{r}
+autoplot(diff(BoxCox(serie_0007BR, lambda = BoxCox.lambda(serie_0007BR))))
+BoxCox.lambda(serie_0007BR)
+serie_0007BR_diff <- (diff(BoxCox(serie_0007BR, lambda = BoxCox.lambda(serie_0007BR))))
+
+```
+
+```{r}
+ndiffs(serie_0007BR)
+```
+
+
+
+А теперь для сравнения я выберу те сайты, которые были выявлены как ошибки в данных.
+0698BR
+```{r}
+site_0698BR <- df %>%
+  filter(NAME == "0698BR") %>%
+  arrange(MONTH)
+
+serie_0698BR <- ts(
+  site_0698BR$KWH_PERIOD,
+  start = c(2019, 1),
+  frequency = 12
+)
+
+autoplot(serie_0698BR)
+
+```
+Мы видим сезонность на август месяц каждого года
+
+```{r}
+
+```
+
+
+
+
