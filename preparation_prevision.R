@@ -67,33 +67,26 @@ df <- df %>%
 #     reste à plus de 20 % de l'ancien, dans le même sens ;
 #   - il n'est pas saisonnier : le même saut ne se répète pas un an avant ou après.
 # L'apprentissage commence au dernier changement de niveau détecté.
-level_change <- function(v, kwh_min = 100) {
-  n   <- length(v)
-  out <- rep(FALSE, n)
-  if (n < 6) return(out)
-  jump <- function(t) {
-    if (t - 3 < 1 || t + 2 > n) return(NA_real_)
-    median(v[t:(t + 2)]) / median(v[(t - 3):(t - 1)]) - 1
-  }
-  for (t in 4:(n - 2)) {
-    pre  <- median(v[(t - 3):(t - 1)])
-    post <- median(v[t:(t + 2)])
-    r    <- post / pre - 1
-    if (abs(r) <= 0.2 || abs(post - pre) * 30.4 < kwh_min) next
-    later <- if (t + 11 <= n) median(v[(t + 9):(t + 11)]) else median(v[(n - 2):n])
-    later <- later / pre - 1
-    if (sign(later) != sign(r) || abs(later) <= 0.2) next
-    other <- c(jump(t + 12), jump(t - 12))
-    if (any(!is.na(other) & sign(other) == sign(r) & abs(other) > 0.1)) next
-    out[t] <- TRUE
-  }
-  out
+
+# Début de l'apprentissage : premier mois de la dernière série de détections
+# dont la valeur est déjà plus proche du nouveau niveau que de l'ancien
+train_start_idx <- function(v, lc) {
+  idx <- which(lc)
+  if (length(idx) == 0) return(1)
+  run <- idx[length(idx)]
+  while ((run[1] - 1) %in% idx) run <- c(run[1] - 1, run)
+  pre  <- median(v[max(1, run[1] - 3):(run[1] - 1)])
+  post <- median(v[run[length(run)]:min(length(v), run[length(run)] + 2)])
+  first_new <- run[abs(v[run] - post) < abs(v[run] - pre)][1]
+  if (is.na(first_new)) max(run) else first_new
 }
 
 df <- df %>%
   group_by(NAME) %>%
   mutate(LEVEL_CHANGE = level_change(KWH_PER_DAY_CLEAN),
-         TRAIN_START  = if (any(LEVEL_CHANGE)) max(MONTH[LEVEL_CHANGE]) else min(MONTH),
+         TRAIN_START  = MONTH[train_start_idx(KWH_PER_DAY_CLEAN, LEVEL_CHANGE)],
+         # 0254BB : toute l'année 2019 est jugée non fiable (section 3.3)
+         TRAIN_START  = if (first(NAME) == "0254BB") as.Date("2020-01-01") else TRAIN_START,
          TRAIN        = MONTH >= TRAIN_START) %>%
   ungroup()
 
