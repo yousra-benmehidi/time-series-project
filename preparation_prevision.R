@@ -31,11 +31,15 @@ df <- df %>%
          DAYS        = as.numeric(END - BEGIN) + 1,
          KWH_PER_DAY = KWH_PERIOD / DAYS)
 
-# ---- 3. Valeurs remplacées (section 3.3) ------------------------------------
-# Factures jugées erronées : remplacées par la médiane des 3 mois avant / 3 mois après
+# ---- 3. Valeurs remplacées (sections 3.3 et 3.4 du rapport) ----------------
+# Factures remplacées par la médiane des 3 mois avant / 3 mois après :
+#   - 0089KO, juin et août 2019 : sous-facturation puis régularisation
+#   - 0690BR, 0274BR, 2106BB : écart compensé un ou deux mois plus tard (relevé décalé)
+# Cette liste doit rester identique à celle du rapport (le rapport vérifie la cohérence).
 replace_list <- tibble(
-  NAME  = c("0089KO",     "0089KO",     "0690BR",     "0690BR"),
-  MONTH = as.Date(c("2019-06-01", "2019-08-01", "2021-03-01", "2021-04-01")),
+  NAME  = c("0089KO", "0089KO", "0690BR", "0690BR", "0274BR", "0274BR", "2106BB", "2106BB"),
+  MONTH = as.Date(c("2019-06-01", "2019-08-01", "2021-03-01", "2021-04-01",
+                    "2021-06-01", "2021-08-01", "2021-07-01", "2021-09-01")),
   REPLACE = TRUE)
 
 local_median <- function(x, k = 3) {
@@ -94,9 +98,9 @@ df <- df %>%
   ungroup()
 
 # ---- 5. Indicateurs ---------------------------------------------------------
-# 0007BR et 1006BB : dernière facture (nov. 2021) suspecte, non confirmable
+# 0007BR, 1006BB et 1143BR : dernière facture (nov. 2021) suspecte, non confirmable
 # -> valeur conservée, prévision à présenter avec une incertitude plus large
-to_confirm <- c("0007BR", "1006BB")
+to_confirm <- c("0007BR", "1006BB", "1143BR")
 
 serie_corrigee <- df %>%
   mutate(FLAG = case_when(
