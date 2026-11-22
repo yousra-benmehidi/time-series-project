@@ -19,6 +19,9 @@ df$KWH_PERIOD <- as.numeric(
 )
 ```
 
+## 1. Préparation des séries temporelles
+
+L'objectif de cette partie est de prévoir la consommation énergétique du mois suivant pour chaque site. Pour cela, nous allons utiliser les séries temporelles afin d'étudier l'évolution de la consommation dans le temps et de comparer différentes méthodes de prévision.
 
 ```{r}
 nrow(df)
@@ -26,6 +29,14 @@ length(unique(df$NAME))
 summary(table(df$NAME))
 table(df$NAME)
 ```
+*1.1 Vérification des données*
+
+Avant de commencer la modélisation, nous avons vérifié la structure du jeu de données.
+
+Le dataset contient 3 220 observations réparties sur 92 sites. Chaque site possède 35 observations mensuelles, allant de janvier 2019 à novembre 2021.
+
+Nous avons également vérifié les dates afin de nous assurer que les mois sont bien représentés pour chaque site. Cette étape est importante, car un mois manquant ou répété pourrait fausser l'analyse des séries temporelles.
+
 
 ```{r}
 summary(as.numeric(table(df$NAME)))
@@ -57,7 +68,14 @@ all(verification$n_months == 35 &
     verification$last == as.Date("2021-11-01"))
 ```
 
-Я выделяю из 92 возможных сайтов только один, чтобы по нему провести первый тестовый анализ.
+*1.2 Transformation en séries temporelles*
+
+Pour commencer, nous avons choisi d'étudier un seul site, 0007BR, afin de comprendre le comportement de sa consommation avant d'appliquer les méthodes aux autres sites.
+
+Les observations ont été classées par ordre chronologique, puis transformées en série temporelle avec une fréquence de 12, puisque les données sont mensuelles.
+
+## 2. Analyse visuelle des séries temporelles
+
 
 ```{r}
 site_0007BR <- df %>%
@@ -82,6 +100,11 @@ end(serie_0007BR)
 ```{r}
 autoplot(serie_0007BR)
 ```
+Dans un premier temps, nous avons représenté graphiquement la consommation du site 0007BR afin d'observer sa tendance générale, ses variations et une éventuelle saisonnalité.
+
+Sur le graphique, nous remarquons que la consommation reste relativement stable entre 2019 et 2020, puis augmente progressivement en 2021.
+
+Nous observons également une hausse plus importante en novembre 2021. Cette valeur semble inhabituelle par rapport aux mois précédents, mais nous ne pouvons pas affirmer qu'il s'agit d'une erreur de facturation.
 
 ```{r}
 autoplot(diff(BoxCox(serie_0007BR, lambda = BoxCox.lambda(serie_0007BR))))
@@ -115,9 +138,55 @@ autoplot(serie_0698BR)
 Мы видим сезонность на август месяц каждого года
 
 ```{r}
+site_0690BR <- df %>%
+  filter(NAME == "0690BR") %>%
+  arrange(MONTH) %>%
+  mutate(
+    DAYS = as.numeric(END - BEGIN) + 1,
+    KWH_PER_DAY = KWH_PERIOD / DAYS
+  )
 
+serie_0690BR <- ts(
+  site_0690BR$KWH_PER_DAY,
+  start = c(2019, 1),
+  frequency = 12
+)
+
+autoplot(serie_0690BR)
+```
+
+```{r}
+train_0690BR <- window(serie_0690BR, end = c(2021, 6))
+
+test_0690BR <- window(serie_0690BR, start = c(2021, 7))
 ```
 
 
+```{r}
+library(forecast)
 
+modele_naive_0690BR <- naive(train_0690BR, h = 5)
+
+autoplot(modele_naive_0690BR)
+```
+
+```{r}
+reel_0690BR <- as.numeric(test_0690BR)
+
+prevision_0690BR <- as.numeric(modele_naive_0690BR$mean)
+erreurs_0690BR <- abs(reel_0690BR - prevision_0690BR)
+
+MAE_0690BR <- mean(erreurs_0690BR)
+MAE_0690BR
+```
+
+```{r}
+resultats_0690BR <- data.frame(
+  Site = "0690BR",
+  Modele = "Naive",
+  MAE_kWh_jour = MAE_0690BR
+)
+
+knitr::kable(resultats_0690BR, digits = 2)
+```
 
