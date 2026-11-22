@@ -1,6 +1,6 @@
 ---
 title: "Prévision de la consommation énergétique des sites radio"
-author: "Liliya SHEVALYE et Sarah AZIRI"
+author: "Liliya SHEVALYE et Yousra Amel BENMEHIDI"
 date: "2026-11-22"
 output:
   pdf_document:
