@@ -68,6 +68,29 @@ df <- df %>%
 #   - il n'est pas saisonnier : le même saut ne se répète pas un an avant ou après.
 # L'apprentissage commence au dernier changement de niveau détecté.
 
+level_change <- function(v, kwh_min = 100) {
+  n   <- length(v)
+  out <- rep(FALSE, n)
+  if (n < 6) return(out)
+  jump <- function(t) {
+    if (t - 3 < 1 || t + 2 > n) return(NA_real_)
+    median(v[t:(t + 2)]) / median(v[(t - 3):(t - 1)]) - 1
+  }
+  for (t in 4:(n - 2)) {
+    pre  <- median(v[(t - 3):(t - 1)])
+    post <- median(v[t:(t + 2)])
+    r    <- post / pre - 1
+    if (abs(r) <= 0.2 || abs(post - pre) * 30.4 < kwh_min) next
+    later <- if (t + 11 <= n) median(v[(t + 9):(t + 11)]) else median(v[(n - 2):n])
+    later <- later / pre - 1
+    if (sign(later) != sign(r) || abs(later) <= 0.2) next
+    other <- c(jump(t + 12), jump(t - 12))
+    if (any(!is.na(other) & sign(other) == sign(r) & abs(other) > 0.1)) next
+    out[t] <- TRUE
+  }
+  out
+}
+
 # Début de l'apprentissage : premier mois de la dernière série de détections
 # dont la valeur est déjà plus proche du nouveau niveau que de l'ancien
 train_start_idx <- function(v, lc) {
