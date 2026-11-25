@@ -804,29 +804,99 @@ L'écart estimé compare chaque facture à la médiane des mois voisins (positif
 
 # 4. Prévision de la consommation de décembre 2021
 
+## 4.1 Données utilisées et groupes de sites
+
 ```{r}
-saisonniers <- c("0698BR", "0998BR", "0480BR", "2106BB")
+library(forecast)
+
+# Force et amplitude de la saisonnalité (sites avec au moins 24 mois)
+force_saison <- function(x) {
+  d <- stl(ts(x, frequency = 12), s.window = "periodic")$time.series
+  max(0, 1 - var(d[, "remainder"]) / var(d[, "seasonal"] + d[, "remainder"]))
+}
+amplitude_saison <- function(x) {
+  d <- stl(ts(x, frequency = 12), s.window = "periodic")$time.series
+  (max(d[, "seasonal"]) - min(d[, "seasonal"])) / mean(x)
+}
+
+prev_saison <- prep %>%
+  filter(TRAIN) %>%
+  arrange(NAME, MONTH) %>%
+  group_by(NAME) %>%
+  filter(n() >= 24) %>%
+  summarise(FORCE     = force_saison(KWH_PER_DAY_CLEAN),
+            AMPLITUDE = amplitude_saison(KWH_PER_DAY_CLEAN),
+            MOIS      = n())
+```
+
+```{r}
+# Règle : saisonnier si force >= 0,6, amplitude >= 15 % et historique complet
+saisonniers <- prev_saison %>%
+  filter(FORCE >= 0.6, AMPLITUDE >= 0.15, MOIS == 35) %>%
+  pull(NAME)
 
 prev_groupes <- prep %>%
   group_by(NAME) %>%
   summarise(MOIS = sum(TRAIN)) %>%
   mutate(GROUPE = case_when(
+    NAME == "0998BR"      ~ "E. Grand site à départager",
     NAME %in% saisonniers ~ "A. Saisonnier",
     MOIS < 12             ~ "D. Historique très court",
     MOIS < 24             ~ "C. Historique moyen",
     TRUE                  ~ "B. Historique long"))
-
 ```
-
-```{r}
-library(forecast)
-```
-
-## 4.1 Données utilisées et groupes de sites
 
 La prévision porte sur la consommation journalière corrigée, calculée sur la seule période d'apprentissage définie en annexe B.4. Les 35 mois sont disponibles pour tous les sites, mais pour les `r sum(prev_groupes$MOIS < 35)` sites ayant connu un changement durable de niveau, seuls les mois postérieurs à ce changement sont utilisés : les mois antérieurs décrivent un fonctionnement qui n'existe plus. La prévision journalière est ensuite multipliée par 31 jours pour obtenir la consommation de décembre.
 
-Conformément à la section 2.5, le choix du modèle dépend du profil du site. Les sites sont répartis en quatre groupes selon la présence d'une saisonnalité et la longueur de l'historique disponible.
+### Repérage de la saisonnalité
+
+Une prévision de décembre doit tenir compte d'un éventuel effet saisonnier. Pour chaque site disposant d'au moins deux ans d'historique, la série est décomposée (méthode STL) en une tendance, une composante saisonnière et un résidu. Deux indicateurs en sont tirés :
+
+- la **force** de la saisonnalité, entre 0 et 1 : elle est proche de 1 lorsque la composante saisonnière domine le résidu, c'est-à-dire lorsque le même profil se répète chaque année ;
+- l'**amplitude** : l'écart entre le mois le plus haut et le mois le plus bas de la composante saisonnière, rapporté à la consommation moyenne du site.
+
+Les deux indicateurs sont nécessaires : une saisonnalité très régulière mais de faible amplitude ne modifie pas la prévision, et à l'inverse une forte amplitude peut provenir d'un seul mois atypique qui ne se répète pas.
+
+```{r}
+prev_saison %>%
+  arrange(desc(AMPLITUDE)) %>%
+  slice_head(n = 10) %>%
+  bind_rows(filter(prev_saison, NAME == "0998BR")) %>%
+  mutate(DECISION = case_when(NAME %in% saisonniers ~ "Oui",
+                              NAME == "0998BR"      ~ "À départager",
+                              TRUE                  ~ "Non"),
+         FORCE     = format(round(FORCE, 2), decimal.mark = ","),
+                  AMPLITUDE = paste0(round(100 * AMPLITUDE), " %")) %>%
+    select(NAME, FORCE, AMPLITUDE, DECISION) %>%
+  kable(col.names = c("Site", "Force", "Amplitude", "Saisonnalité retenue"),
+        align = c("l", "r", "r", "c"), booktabs = TRUE,
+        caption = "Les dix plus fortes amplitudes saisonnières, et 0998BR") %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r fig.height=4.8, fig.cap="Profil annuel des sites candidats : une courbe par année."}
+prev_candidats_saison <- c("0698BR", "0480BR", "2106BB", "0998BR",
+                           "0495KO", "0489KO", "1006BB", "1143BR")
+
+prep %>%
+  filter(NAME %in% prev_candidats_saison, TRAIN) %>%
+  mutate(NAME  = factor(NAME, levels = prev_candidats_saison),
+         MOIS  = as.integer(format(MONTH, "%m")),
+         ANNEE = format(MONTH, "%Y")) %>%
+  ggplot(aes(MOIS, KWH_PER_DAY_CLEAN, colour = ANNEE)) +
+  geom_line() + geom_point(size = 0.8) +
+  facet_wrap(~ NAME, ncol = 4, scales = "free_y") +
+  scale_x_continuous(breaks = c(1, 4, 7, 10, 12)) +
+  labs(x = "Mois", y = "kWh/jour", colour = NULL) +
+  theme_minimal() + theme(legend.position = "bottom")
+```
+
+La superposition des années confirme la saisonnalité de trois sites : 0698BR, dont la consommation culmine en juillet-août ; 0480BR, nettement plus consommateur en hiver ; et 2106BB, qui présente un pic estival (le plateau de l'été 2021 correspond aux valeurs remplacées en section 3). Pour 0489KO, 1006BB et 1143BR, l'amplitude élevée provient d'un seul mois atypique, déjà signalé en section 3, et non d'un profil qui se répète. 0495KO présente une légère hausse hivernale, mais d'environ 3 kWh par jour seulement, soit une centaine de kWh sur le mois : il est traité comme un site non saisonnier.
+
+La section 3.5 recommande un modèle avec saisonnalité pour les deux grands sites. L'analyse ci-dessus confirme cette recommandation pour 0698BR. Pour 0998BR, le constat est moins net : la série présente des ondulations, avec un maximum en début d'année en 2020 comme en 2021, mais leur amplitude reste faible (environ 7 %) et les deux mois de décembre observés évoluent en sens opposé. Surtout, sa consommation baisse de façon continue depuis avril 2021. Plutôt que de trancher a priori, ce site forme un groupe à part : les méthodes saisonnières et les méthodes de tendance y sont comparées, et la validation détermine celle qui est retenue.
+
+
+Conformément à la section 2.5, le choix du modèle dépend du profil du site. Les sites sont répartis en cinq groupes selon la présence d'une saisonnalité et la longueur de l'historique disponible.
 
 
 ```{r}
@@ -875,11 +945,317 @@ Ces quatre situations montrent qu'un modèle unique ne conviendrait pas à l'ens
 
 
 
+## 4.2 Méthodes de prévision
+
+Plusieurs méthodes de prévision sont mises en concurrence. Elles se répartissent en trois familles : des méthodes simples, qui servent de référence (une méthode plus complexe n'est retenue que si elle fait mieux qu'elles) ; des modèles de tendance pour les groupes B et C ; des méthodes saisonnières pour le groupe A, qui dispose d'au moins deux années d'historique. Les deux méthodes saisonnières les plus simples (SNAIVE et SNAIVE_CROISSANCE) sont également testées dans le groupe B, afin de vérifier si la légère hausse estivale observée sur de nombreux sites améliore la prévision. Enfin, deux combinaisons calculent la moyenne des prévisions de plusieurs méthodes : leurs erreurs se compensant en partie, la moyenne est souvent plus précise que chacune des méthodes prise isolément.
+
+Pour 0998BR (groupe E), les méthodes de tendance et les méthodes saisonnières sont toutes comparées.
+
+```{r}
+prev_methodes <- list(
+  NAIVE = function(x) tail(x, 1),
+  MOY3  = function(x) mean(tail(x, 3)),
+  DRIFT = function(x) {
+    n <- length(x)
+    x[n] + (x[n] - x[1]) / (n - 1)
+  },
+  REGRESSION = function(x) {
+    t <- seq_along(x)
+    as.numeric(predict(lm(x ~ t), newdata = data.frame(t = length(x) + 1)))
+  },
+  ETS   = function(x) as.numeric(forecast(ets(x), h = 1)$mean),
+  ARIMA = function(x) as.numeric(forecast(auto.arima(x, seasonal = FALSE), h = 1)$mean),
+  SNAIVE = function(x) x[length(x) - 11],
+  SNAIVE_CROISSANCE = function(x) {
+    n <- length(x)
+    x[n - 11] * mean(x[(n - 2):n]) / mean(x[(n - 14):(n - 12)])
+  },
+  STL    = function(x) as.numeric(stlf(ts(x, frequency = 12), h = 1)$mean),
+  SARIMA = function(x) as.numeric(forecast(auto.arima(ts(x, frequency = 12)), h = 1)$mean),
+  MED3    = function(x) median(tail(x, 3)),
+  SNAIVE2 = function(x) mean(c(x[length(x) - 11], x[length(x) - 23]))
+)
+
+prev_methodes$COMBI_TENDANCE <- function(x) {
+  mean(c(prev_methodes$MOY3(x), prev_methodes$ETS(x), prev_methodes$ARIMA(x)))
+}
+prev_methodes$COMBI_SAISON <- function(x) {
+  mean(c(prev_methodes$SNAIVE2(x), prev_methodes$STL(x), prev_methodes$SARIMA(x)))
+}
+```
+
+```{r}
+tribble(
+  ~`Méthode`,          ~Principe,                                                                                        ~Groupes,
+  "NAIVE",             "Valeur du dernier mois",                                                                          "A, B, C, D",
+  "MOY3",              "Moyenne des trois derniers mois",                                                                 "B, C, D",
+  "MED3",              "Médiane des trois derniers mois, moins sensible à un mois atypique",                             "B, C, D",
+  "DRIFT",             "Prolongement de la pente entre le premier et le dernier mois",                                    "B, C",
+  "REGRESSION",        "Droite de tendance ajustée sur l'ensemble des mois",                                              "B, C",
+  "ETS",               "Lissage exponentiel : les mois récents pèsent davantage que les mois anciens",                    "B, C",
+  "ARIMA",             "Modèle ARIMA non saisonnier, ordres choisis automatiquement",                                     "B, C",
+  "SNAIVE",            "Valeur du même mois l'année précédente",                                                          "A",
+  "SNAIVE2",           "Moyenne du même mois sur les deux années précédentes",                                            "A",
+  "SNAIVE_CROISSANCE", "Même mois l'année précédente, corrigé de l'évolution du site sur un an",                          "A",
+  "STL",               "Décomposition en tendance, saisonnalité et résidu, puis prévision",                               "A",
+  "SARIMA",            "Modèle ARIMA saisonnier (période de 12 mois)",                                                    "A",
+  "COMBI_TENDANCE",    "Moyenne des prévisions MOY3, ETS et ARIMA",                                                       "B, C",
+  "COMBI_SAISON",      "Moyenne des prévisions SNAIVE2, STL et SARIMA",                                                   "A"
+) %>%
+  kable(booktabs = TRUE, caption = "Méthodes de prévision comparées") %>%
+  kable_styling(latex_options = "HOLD_position", font_size = 9) %>%
+  column_spec(2, width = "9cm")
+```
 
 
+## 4.3 Validation des méthodes sur le passé
+
+Chaque méthode est évaluée sur des mois déjà observés, en se plaçant à la fin du mois précédent : pour prévoir un mois de test, la méthode ne dispose que des mois antérieurs, puis sa prévision est comparée à la valeur réelle. L'opération est répétée sur les onze derniers mois (janvier à novembre 2021) pour les groupes A et E, afin d'inclure un hiver et un été, sur les six derniers mois pour les groupes B et C, et sur les trois derniers pour 1240BR (groupe D), dont l'historique est très court.
+
+L'erreur est mesurée par la MAPE (*Mean Absolute Percentage Error*), moyenne des écarts relatifs entre prévision et réalité :
+
+\[
+\mathrm{MAPE} = \frac{1}{n}\sum_{t=1}^{n} \frac{|\,\text{prévu}_t - \text{réel}_t\,|}{\text{réel}_t} \times 100 .
+\]
+
+Exprimée en pourcentage, elle permet de comparer des sites de tailles très différentes.
+
+```{r}
+# Méthodes comparées dans chaque groupe
+prev_tendance <- c("NAIVE", "MOY3", "MED3", "DRIFT", "REGRESSION",
+                   "ETS", "ARIMA", "COMBI_TENDANCE")
+prev_saison_m <- c("SNAIVE", "SNAIVE2", "SNAIVE_CROISSANCE",
+                   "STL", "SARIMA", "COMBI_SAISON")
+
+prev_candidats <- list(
+  "A. Saisonnier"              = c("NAIVE", "ARIMA", prev_saison_m),
+  "B. Historique long"         = c(prev_tendance, "SNAIVE", "SNAIVE_CROISSANCE"),
+  "C. Historique moyen"        = prev_tendance,
+  "D. Historique très court"   = c("NAIVE", "MOY3", "MED3"),
+  "E. Grand site à départager" = c(prev_tendance, prev_saison_m))
+
+# Nombre de mois testés dans chaque groupe
+prev_n_test <- c("A. Saisonnier"              = 11,
+                 "B. Historique long"         = 6,
+                 "C. Historique moyen"        = 6,
+                 "D. Historique très court"   = 3,
+                 "E. Grand site à départager" = 11)
 
 
+# Validation d'un site : pour chaque mois testé, chaque méthode ne voit
+# que les mois précédents et prévoit le mois testé
+prev_backtest_site <- function(d, methodes, n_test) {
+  x <- d$KWH_PER_DAY_CLEAN
+  n <- length(x)
+  res <- NULL
+  for (k in (n - n_test + 1):n) {            # chaque mois testé
+    historique <- x[1:(k - 1)]                # seulement les mois AVANT
+    for (m in methodes) {                      # chaque méthode
+      prevu <- tryCatch(prev_methodes[[m]](historique), error = function(e) NA)
+      res <- rbind(res, data.frame(MOIS = d$MONTH[k], METHODE = m,
+                                   PREVU = prevu, REEL = x[k]))
+    }
+  }
+  res$ERREUR_PCT <- 100 * abs(res$PREVU - res$REEL) / res$REEL
+  res
+}
+```
 
+```{r}
+# Validation de tous les sites (quelques minutes de calcul)
+prev_resultats <- NULL
+prev_sites <- prev_groupes$NAME
+
+for (prev_i in seq_along(prev_sites)) {
+  prev_nom    <- prev_sites[prev_i]
+  prev_groupe <- prev_groupes$GROUPE[prev_groupes$NAME == prev_nom]
+  message(prev_i, "/", length(prev_sites), " : ", prev_nom)
+
+  prev_d <- prep %>% filter(NAME == prev_nom, TRAIN) %>% arrange(MONTH)
+  prev_r <- prev_backtest_site(prev_d, prev_candidats[[prev_groupe]],
+                               prev_n_test[[prev_groupe]])
+  prev_r$NAME   <- prev_nom
+  prev_r$GROUPE <- prev_groupe
+  prev_resultats <- rbind(prev_resultats, prev_r)
+}
+```
+
+```{r}
+# Méthodes de la plus simple à la plus complexe
+prev_ordre <- c("NAIVE", "MOY3", "MED3", "SNAIVE", "SNAIVE2", "DRIFT",
+                "SNAIVE_CROISSANCE", "REGRESSION", "ETS", "ARIMA",
+                "STL", "SARIMA", "COMBI_TENDANCE", "COMBI_SAISON")
+
+# Erreur moyenne (MAPE) de chaque méthode dans chaque groupe
+prev_mape <- prev_resultats %>%
+  group_by(GROUPE, METHODE) %>%
+  summarise(MAPE = mean(ERREUR_PCT, na.rm = TRUE), .groups = "drop")
+
+# Règle de parcimonie : la méthode la plus simple à 0,5 point au plus de la meilleure
+prev_choisir <- function(m) {
+  m %>%
+    filter(MAPE <= min(MAPE) + 0.5) %>%
+    arrange(match(METHODE, prev_ordre)) %>%
+    slice(1)
+}
+
+prev_choix <- prev_mape %>%
+  group_by(GROUPE) %>%
+  group_modify(~ prev_choisir(.x)) %>%
+  ungroup()
+
+# Grand site 0698BR : même règle, appliquée à ce seul site
+prev_choix_0698 <- prev_resultats %>%
+  filter(NAME == "0698BR") %>%
+  group_by(METHODE) %>%
+  summarise(MAPE = mean(ERREUR_PCT, na.rm = TRUE)) %>%
+  prev_choisir()
+```
+
+```{r}
+prev_mape %>%
+  mutate(G = substr(GROUPE, 1, 1),
+         MAPE = paste0(fr(MAPE, 1), " %")) %>%
+  select(METHODE, G, MAPE) %>%
+  pivot_wider(names_from = G, values_from = MAPE, values_fill = "–") %>%
+  arrange(match(METHODE, prev_ordre)) %>%
+  select(METHODE, A, B, C, D, E) %>%
+  kable(col.names = c("Méthode", "A", "B", "C", "D", "E"),
+        align = c("l", rep("r", 5)), booktabs = TRUE,
+        caption = "Erreur moyenne de prévision (MAPE) par méthode et par groupe") %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+Les écarts entre les meilleures méthodes sont faibles : dans le groupe B, la combinaison, ARIMA, ETS et la méthode naïve se tiennent en 0,1 point. Une différence aussi faible, mesurée sur quelques mois, n'est pas significative. Le choix suit donc une règle de parcimonie : on retient la méthode la plus simple dont l'erreur ne dépasse pas celle de la meilleure méthode de plus de 0,5 point. Cette règle est appliquée automatiquement à chaque groupe, et pourrait l'être de la même façon à un parc beaucoup plus grand.
+
+```{r}
+bind_rows(prev_choix,
+          prev_choix_0698 %>% mutate(GROUPE = "Grand site 0698BR")) %>%
+  mutate(MAPE = paste0(fr(MAPE, 1), " %")) %>%
+  select(GROUPE, METHODE, MAPE) %>%
+  kable(col.names = c("Groupe ou site", "Méthode retenue", "MAPE"),
+        align = c("l", "l", "r"), booktabs = TRUE,
+        caption = "Méthodes retenues (règle de parcimonie)") %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+La méthode naïve est retenue pour les cinq groupes. Sur un horizon d'un mois, la consommation d'un site est très proche de celle du mois précédent, et les modèles plus complexes n'apportent pas de gain mesurable. Les méthodes saisonnières testées dans le groupe B font nettement moins bien (3,6 % et 5,4 %) : la légère hausse estivale observée sur de nombreux sites n'améliore pas la prévision du mois suivant. De même, pour 0998BR, les méthodes saisonnières sont moins précises que les méthodes de tendance, ce qui confirme l'absence de saisonnalité exploitable sur ce site.
+
+Le modèle ARIMA non saisonnier, ajouté au groupe A à titre de contrôle, fait moins bien que la méthode naïve (5,5 %).
+
+Seul le grand site 0698BR, qui associe une forte croissance et une saisonnalité marquée, bénéficie d'une méthode saisonnière corrigée de la croissance (2,9 % contre 4,2 % pour la méthode naïve).
+
+Conformément à la section 2.5, les résultats du groupe B ont également été examinés séparément pour les sites en croissance (profil 1) et en légère baisse (profil 4). Le classement des méthodes est le même dans les deux cas : la croissance d'environ 6 % par an, soit 0,5 % par mois, est trop faible pour qu'un modèle de tendance fasse mieux que la méthode naïve à un mois.
+
+Deux remarques sur la validation. La méthode STL n'a pas pu être estimée pour le premier mois de test des groupes A et E, l'historique disponible (24 mois) étant trop court ; son erreur est calculée sur les mois restants. Par ailleurs, la validation porte sur les consommations corrigées : pour les quelques mois remplacés en section 3, la valeur de référence dépend en partie des mois voisins.
+
+
+## 4.4 Prévision de décembre 2021
+
+```{r}
+# Méthode retenue pour chaque site : celle de son groupe, sauf 0698BR
+prev_dec <- prev_groupes %>%
+  left_join(prev_choix %>% select(GROUPE, METHODE), by = "GROUPE") %>%
+  mutate(METHODE = if_else(NAME == "0698BR", prev_choix_0698$METHODE, METHODE))
+
+# Prévision : toute la période d'apprentissage, jusqu'en novembre 2021
+prev_dec$KWH_JOUR <- NA
+for (prev_i in seq_len(nrow(prev_dec))) {
+  prev_x <- prep %>%
+    filter(NAME == prev_dec$NAME[prev_i], TRAIN) %>%
+    arrange(MONTH) %>%
+    pull(KWH_PER_DAY_CLEAN)
+  prev_dec$KWH_JOUR[prev_i] <- prev_methodes[[prev_dec$METHODE[prev_i]]](prev_x)
+}
+
+prev_dec <- prev_dec %>% mutate(KWH_DEC = 31 * KWH_JOUR)
+```
+
+
+```{r}
+# Seuil d'erreur : 80 % des erreurs de validation de la méthode retenue sont plus petites
+prev_q80 <- prev_resultats %>%
+  inner_join(prev_choix %>% select(GROUPE, METHODE), by = c("GROUPE", "METHODE")) %>%
+  group_by(GROUPE) %>%
+  summarise(Q80 = quantile(ERREUR_PCT, 0.8, na.rm = TRUE))
+
+prev_q80_0698 <- prev_resultats %>%
+  filter(NAME == "0698BR", METHODE == prev_choix_0698$METHODE) %>%
+  pull(ERREUR_PCT) %>%
+  quantile(0.8, na.rm = TRUE)
+
+# Dernière facture à confirmer (section 3.3) : incertitude doublée
+prev_a_confirmer <- prep %>% filter(FLAG == "À confirmer") %>% pull(NAME)
+
+prev_dec <- prev_dec %>%
+  select(-any_of(c("Q80", "BAS", "HAUT"))) %>%
+  left_join(prev_q80, by = "GROUPE") %>%
+  mutate(Q80  = if_else(NAME == "0698BR", unname(prev_q80_0698), Q80),
+         Q80  = if_else(NAME %in% prev_a_confirmer, 2 * Q80, Q80),
+         BAS  = KWH_DEC * (1 - Q80 / 100),
+         HAUT = KWH_DEC * (1 + Q80 / 100))
+```
+
+
+```{r}
+prev_synthese <- prev_dec %>%
+  group_by(GROUPE) %>%
+  summarise(SITES = n(), PREV = sum(KWH_DEC), BAS = sum(BAS), HAUT = sum(HAUT))
+
+prev_total <- prev_synthese %>%
+  summarise(GROUPE = "Total", SITES = sum(SITES),
+            PREV = sum(PREV), BAS = sum(BAS), HAUT = sum(HAUT))
+
+bind_rows(prev_synthese, prev_total) %>%
+  mutate(PREV       = fr(PREV),
+         INTERVALLE = paste0(fr(BAS), " – ", fr(HAUT))) %>%
+  select(GROUPE, SITES, PREV, INTERVALLE) %>%
+  kable(col.names = c("Groupe", "Sites", "Prévision (kWh)", "Intervalle (kWh)"),
+        align = c("l", "r", "r", "r"), booktabs = TRUE,
+        caption = "Prévision de la consommation de décembre 2021 par groupe") %>%
+  kable_styling(latex_options = "HOLD_position") %>%
+  row_spec(nrow(prev_synthese) + 1, bold = TRUE)
+```
+
+```{r fig.height=7, ig.pos="H", fig.cap="Historique depuis 2020 et prévision de décembre 2021 pour neuf sites. Ligne bleue : prévision ; zone bleue : intervalle (80 % des erreurs de validation) ; pointillés : décembre 2020."}
+prev_sites_fig <- c("0698BR", "0998BR", "0480BR", "2106BB", "0007BR",
+                    "0487BR", "1088KO", "1093KO", "1240BR")
+
+prev_lab <- prev_dec %>%
+  filter(NAME %in% prev_sites_fig) %>%
+  mutate(LAB = paste0(NAME, " (groupe ", substr(GROUPE, 1, 1), ")"))
+prev_lab <- setNames(prev_lab$LAB, prev_lab$NAME)[prev_sites_fig]
+
+# Historique depuis janvier 2020
+prev_hist <- prep %>%
+  filter(NAME %in% prev_sites_fig, MONTH >= as.Date("2020-01-01")) %>%
+  mutate(PANNEAU = factor(prev_lab[NAME], levels = prev_lab))
+
+# Prévision : du dernier mois observé (novembre) à décembre
+prev_fan <- bind_rows(
+  prep %>%
+    filter(NAME %in% prev_sites_fig, MONTH == max(MONTH)) %>%
+    transmute(NAME, MONTH, Y = KWH_PER_DAY_CLEAN, YMIN = Y, YMAX = Y),
+  prev_dec %>%
+    filter(NAME %in% prev_sites_fig) %>%
+    transmute(NAME, MONTH = as.Date("2021-12-01"),
+              Y = KWH_JOUR, YMIN = BAS / 31, YMAX = HAUT / 31)
+) %>%
+  mutate(PANNEAU = factor(prev_lab[NAME], levels = prev_lab))
+
+ggplot(prev_hist, aes(MONTH, KWH_PER_DAY_CLEAN)) +
+  geom_vline(xintercept = as.Date("2020-12-01"), linetype = "dotted", colour = "grey60") +
+  geom_line(colour = "grey40") +
+  geom_ribbon(data = prev_fan, aes(x = MONTH, ymin = YMIN, ymax = YMAX),
+              inherit.aes = FALSE, fill = "steelblue", alpha = 0.3) +
+  geom_line(data = prev_fan, aes(x = MONTH, y = Y),
+            colour = "steelblue", linewidth = 0.9) +
+  geom_point(data = filter(prev_fan, MONTH == as.Date("2021-12-01")),
+             aes(x = MONTH, y = Y), colour = "steelblue", size = 1.2) +
+  facet_wrap(~ PANNEAU, ncol = 2, scales = "free_y") +
+  labs(x = NULL, y = "kWh/jour") +
+  theme_minimal()
+```
 
 
 
@@ -1008,7 +1384,26 @@ Seul l'historique postérieur au dernier changement détecté est utilisé pour 
 
 
 
+# Annexe C : prévision de décembre 2021 par site
 
+```{r}
+prev_dec %>%
+  arrange(GROUPE, NAME) %>%
+  mutate(G          = substr(GROUPE, 1, 1),
+         PREV       = fr(KWH_DEC),
+         INTERVALLE = paste0(fr(BAS), " – ", fr(HAUT)),
+         NOTE = case_when(NAME %in% prev_a_confirmer ~ "Dernière facture à confirmer",
+                          NAME == "0480BR"            ~ "Pic hivernal probable",
+                          NAME == "1240BR"            ~ "Historique très court",
+                          TRUE                        ~ "")) %>%
+  select(NAME, G, METHODE, PREV, INTERVALLE, NOTE) %>%
+  kable(col.names = c("Site", "Groupe", "Méthode", "Prévision (kWh)",
+                      "Intervalle (kWh)", "Remarque"),
+        align = c("l", "c", "l", "r", "r", "l"),
+        booktabs = TRUE, longtable = TRUE,
+        caption = "Prévision de décembre 2021 pour chacun des 92 sites") %>%
+  kable_styling(latex_options = "repeat_header", font_size = 8)
+```
 
 
 
